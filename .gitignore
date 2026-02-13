@@ -1,0 +1,31 @@
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Node / Web-UI
+web-ui/node_modules/
+web-ui/dist/
+
+# Application Data
+ollama-ensemble-proxy/data/dossiers/
+ollama-ensemble-proxy/data/servers.json
+ollama-ensemble-proxy/data/llm_logs.json
+
+# Logs
+*.log
+/tmp/proxy.log
+
+# Environment files
+.env
+# ensemble-proxy.env is included as a template, but usually we ignore local ones. 
+# Keeping it for now as requested by project structure.
+
+# OS files
+.DS_Store
+Thumbs.db
