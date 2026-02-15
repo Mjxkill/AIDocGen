@@ -107,6 +107,98 @@ class Writer:
                 for v in obj: walk(v, parent_title=parent_title)
         walk(data); return normalized
 
+    def generate_sub_questions_from_outline(self, outline: list[dict[str, Any]], main_question: str, max_questions: int = 35) -> list[dict[str, str]]:
+        """Generate search sub-questions from the outline sections."""
+        sub_questions = []
+        sq_id = 1
+        
+        # Extract main topic/product/entity from question
+        main_topic = self._extract_main_topic(main_question)
+        
+        for item in outline:
+            if "chapters" in item:
+                # 3-level structure
+                p_title = item.get("party_title", "")
+                p_keywords = self._extract_keywords(p_title) if p_title else []
+                for chapter in item.get("chapters", []):
+                    c_title = chapter.get("chapter_title", "")
+                    c_keywords = self._extract_keywords(c_title)
+                    for section in chapter.get("sub_sections", []):
+                        s_title = section.get("title", "")
+                        # Build search query
+                        query = self._build_search_query(s_title, c_keywords + p_keywords, main_topic)
+                        sub_questions.append({"id": f"SQ{sq_id}", "question": query})
+                        sq_id += 1
+                        if sq_id > max_questions:
+                            return sub_questions
+            else:
+                # 2-level structure
+                c_title = item.get("chapter_title", "")
+                c_keywords = self._extract_keywords(c_title)
+                for section in item.get("sub_sections", []):
+                    s_title = section.get("title", "")
+                    query = self._build_search_query(s_title, c_keywords, main_topic)
+                    sub_questions.append({"id": f"SQ{sq_id}", "question": query})
+                    sq_id += 1
+                    if sq_id > max_questions:
+                        return sub_questions
+        
+        return sub_questions
+
+    def _extract_main_topic(self, question: str) -> str:
+        """Extract the main topic/product/entity from a question.
+        
+        Examples:
+        - "Fais moi un dossier complet sur le MCU IMX8MP de NXP" -> "IMX8MP NXP"
+        - "Qualité des vaccins en France" -> "vaccins France"
+        """
+        # Remove question verbs and common words
+        question = re.sub(r'(?i)^(fais|fait|faire|écris|écrire|rédige|rédiger|crée|créer|donne|donner)\s+(moi\s+)?(un\s+|une\s+)?(dossier|rapport|document|étude|article)\s+(complet|détaillé|completa?)?\s*(sur|de|about)?\s*', '', question)
+        
+        # Extract meaningful terms
+        stop_words = {"le", "la", "les", "un", "une", "des", "du", "de", "et", "ou", "mais", "sur", "dans", "pour", "avec", 
+                      "the", "a", "an", "and", "or", "but", "for", "with", "about", "of", "in", "to", "on"}
+        
+        words = re.findall(r'\b[A-ZÀ-ÿ][a-zA-ZÀ-ÿ]*\b|\b[a-zA-ZÀ-ÿ]{4,}\b', question)
+        keywords = [w for w in words if w.lower() not in stop_words]
+        
+        # Prioritize uppercase terms (likely proper nouns: IMX8MP, NXP, France, etc.)
+        proper_nouns = [w for w in words if w[0].isupper() and w.lower() not in stop_words]
+        other_terms = [w for w in keywords if w not in proper_nouns]
+        
+        # Combine: proper nouns first, then other important terms
+        result = proper_nouns[:3] + other_terms[:2]
+        return " ".join(result)
+
+    def _extract_keywords(self, text: str) -> list[str]:
+        """Extract key terms from a title."""
+        stop_words = {"le", "la", "les", "un", "une", "des", "du", "de", "et", "ou", "mais", "sur", "dans", "pour", "avec", "etc",
+                      "the", "a", "an", "and", "or", "but", "for", "with", "about", "of", "in", "to", "on", "as"}
+        
+        words = re.findall(r'\b[a-zA-ZÀ-ÿ]{3,}\b', text.lower())
+        return [w for w in words if w not in stop_words][:6]
+
+    def _build_search_query(self, section_title: str, context_keywords: list[str], main_topic: str) -> str:
+        """Build an optimized search query from section context."""
+        # Extract section-specific keywords
+        section_keywords = self._extract_keywords(section_title)
+        
+        # Build query: section keywords + context + main topic
+        query_parts = section_keywords[:4]
+        
+        # Add context keywords if not already present
+        for kw in context_keywords[:2]:
+            if kw not in query_parts:
+                query_parts.append(kw)
+        
+        # Add main topic if not present
+        main_terms = main_topic.split()
+        for term in main_terms[:2]:
+            if term.lower() not in [p.lower() for p in query_parts]:
+                query_parts.append(term)
+        
+        return " ".join(query_parts)
+
     async def plan_dossier(self, question: str, detail_level: str, llm_logs: list[dict[str, Any]], prompt_type: str = "generic", language: str = "fr", presearch_results: dict[str, Any] | None = None, run_dir: Path | None = None, coder_model_override: str | None = None) -> dict[str, Any]:
         lang_name = {"fr": "Français", "en": "English", "es": "Español", "de": "Deutsch"}.get(language, "Français")
         debug_info = {"attempts": [], "planner_prompt": {"system": "", "user": ""}}
@@ -131,8 +223,11 @@ class Writer:
         master_outline = self.parse_markdown_outline(draft_md)
         
         if len(master_outline) >= 5:
+            # Generate sub-questions from the outline
+            sub_questions = self.generate_sub_questions_from_outline(master_outline, question)
+            debug_info["sub_questions_generated"] = len(sub_questions)
             if run_dir: (run_dir / "planner_debug.json").write_text(json.dumps(debug_info, ensure_ascii=False, indent=2))
-            return {"question_reformulated": question, "master_outline": master_outline, "sub_questions": []}
+            return {"question_reformulated": question, "master_outline": master_outline, "sub_questions": sub_questions}
 
         # --- STEP 3: IA FALLBACK ---
         coder_model = coder_model_override or self.config.planner_book_model_4_json
@@ -147,8 +242,11 @@ class Writer:
                 attempt_info["chapters_found"] = len(master_outline)
                 debug_info["attempts"].append(attempt_info)
                 if len(master_outline) >= 3:
+                    # Generate sub-questions from the outline
+                    sub_questions = self.generate_sub_questions_from_outline(master_outline, question)
+                    debug_info["sub_questions_generated"] = len(sub_questions)
                     if run_dir: (run_dir / "planner_debug.json").write_text(json.dumps(debug_info, ensure_ascii=False, indent=2))
-                    return {"question_reformulated": question, "master_outline": master_outline, "sub_questions": []}
+                    return {"question_reformulated": question, "master_outline": master_outline, "sub_questions": sub_questions}
             except Exception as e:
                 attempt_info["error"] = str(e)
             debug_info["attempts"].append(attempt_info)
