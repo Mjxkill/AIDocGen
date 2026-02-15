@@ -17,7 +17,7 @@ class DossierEngine:
         self.analyst = Analyst(config, self.llm)
         self.writer = Writer(config, self.llm)
 
-    async def run(self, run_id: str, question: str, prompt_type: str = "generic", detail_level: str = "medium", resume: bool = False) -> dict[str, Any]:
+    async def run(self, run_id: str, question: str, prompt_type: str = "generic", detail_level: str = "medium", resume: bool = False, language: str = "fr", coder_model: str | None = None) -> dict[str, Any]:
         run_dir = Path(self.config.data_dir) / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
         
@@ -25,7 +25,10 @@ class DossierEngine:
         s_path = run_dir / "status.json"
         data = load_json(s_path) or {}
         data["state"] = "running"
+        data["error"] = None # CLEAR OLD ERROR
         data["updated_at"] = int(time.time())
+        data["language"] = language
+        if coder_model: data["coder_model"] = coder_model
         save_json(s_path, data)
         
         llm_logs = []
@@ -37,7 +40,7 @@ class DossierEngine:
             # 1. PRESEARCH
             pre = await self._step(run_dir, "presearch", resume, None, lambda: self.researcher.presearch(question))
             # 2. PLANNER
-            pla = await self._step(run_dir, "planner", resume, None, lambda: self.writer.plan_dossier(question, detail_level, llm_logs, prompt_type))
+            pla = await self._step(run_dir, "planner", resume, None, lambda: self.writer.plan_dossier(question, detail_level, llm_logs, prompt_type, language, presearch_results=pre, run_dir=run_dir, coder_model_override=coder_model))
             
             # 3. PAUSE
             if not (run_dir / "validated.txt").exists():
@@ -78,7 +81,7 @@ class DossierEngine:
             ver = await self._step(run_dir, "verdicts", resume, None, lambda: self.analyst.verify_claims(clm["claims"], llm_logs, None, run_dir))
             # 9. WRITING
             await emit_progress(None, run_dir, "sections", "Rédaction des chapitres du dossier...")
-            sec = await self._step(run_dir, "sections", resume, None, lambda: self.writer.write_sections(pla, clm["claims"], llm_logs, None, run_dir))
+            sec = await self._step(run_dir, "sections", resume, None, lambda: self.writer.write_sections(pla, clm["claims"], llm_logs, None, run_dir, language))
 
             # 10. ASSEMBLY
             report_md, annex_md = await self.writer.assemble_report(pla, sec, clm["claims"], ver, cor)

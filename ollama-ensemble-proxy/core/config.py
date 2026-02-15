@@ -10,6 +10,7 @@ def env_bool(name: str, default: bool) -> bool:
 @dataclass
 class DossierConfig:
     ollama_base_url: str
+    ollama_api_key: str | None
     data_dir: str
     planner_model: str
     planner_panel_models_csv: str
@@ -61,49 +62,32 @@ class DossierConfig:
 
     @classmethod
     def from_env(cls) -> "DossierConfig":
-        outline_min_subsections = max(
-            0,
-            int(os.getenv("ENSEMBLE_DOSSIER_OUTLINE_MIN_SUBSECTIONS", "0")),
-        )
+        outline_min_subsections = max(0, int(os.getenv("ENSEMBLE_DOSSIER_OUTLINE_MIN_SUBSECTIONS", "0")))
         outline_max_subsections = int(os.getenv("ENSEMBLE_DOSSIER_OUTLINE_MAX_SUBSECTIONS", "0"))
         if outline_max_subsections > 0 and outline_max_subsections < outline_min_subsections:
             outline_max_subsections = outline_min_subsections
+        
         return cls(
-            ollama_base_url=os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434"),
-            data_dir=os.getenv(
-                "ENSEMBLE_DOSSIER_DATA_DIR",
-                "/root/codex/ollama-ensemble-proxy/data/dossiers",
-            ),
-            planner_model=os.getenv("ENSEMBLE_DOSSIER_PLANNER_MODEL", "qwen2.5:32b"),
+            ollama_base_url=os.getenv("OLLAMA_BASE_URL", "https://ollama.com"),
+            ollama_api_key=os.getenv("OLLAMA_API_KEY"),
+            data_dir=os.getenv("ENSEMBLE_DOSSIER_DATA_DIR", "/root/codex/ollama-ensemble-proxy/data/dossiers"),
+            planner_model=os.getenv("ENSEMBLE_DOSSIER_PLANNER_MODEL", "glm-5"),
             planner_panel_models_csv=os.getenv("ENSEMBLE_DOSSIER_PLANNER_PANEL_MODELS", ""),
-            planner_synth_model=os.getenv(
-                "ENSEMBLE_DOSSIER_PLANNER_SYNTH_MODEL",
-                os.getenv("ENSEMBLE_DOSSIER_JUDGE_MODEL", "qwen2.5:32b"),
-            ),
-            planner_book_model_1=os.getenv("ENSEMBLE_DOSSIER_BOOK_MODEL_1", "gemma2:27b"),
-            planner_book_model_2=os.getenv("ENSEMBLE_DOSSIER_BOOK_MODEL_2", "mistral-small3.2:24b"),
-            planner_book_model_3=os.getenv("ENSEMBLE_DOSSIER_BOOK_MODEL_3", "qwen3:32b"),
-            planner_book_model_4_json=os.getenv(
-                "ENSEMBLE_DOSSIER_BOOK_MODEL_4_JSON",
-                "qwen2.5-coder:32b",
-            ),
+            planner_synth_model=os.getenv("ENSEMBLE_DOSSIER_PLANNER_SYNTH_MODEL", "mistral-large-3:675b"),
+            planner_book_model_1=os.getenv("ENSEMBLE_DOSSIER_BOOK_MODEL_1", "glm-5"),
+            planner_book_model_2=os.getenv("ENSEMBLE_DOSSIER_BOOK_MODEL_2", "mistral-large-3:675b"),
+            planner_book_model_3=os.getenv("ENSEMBLE_DOSSIER_BOOK_MODEL_3", "glm-5"),
+            planner_book_model_4_json=os.getenv("ENSEMBLE_DOSSIER_BOOK_MODEL_4_JSON", "qwen3-coder:480b"),
             planner_book_web_links=max(8, int(os.getenv("ENSEMBLE_DOSSIER_BOOK_WEB_LINKS", "60"))),
             planner_book_page_chars=max(2200, int(os.getenv("ENSEMBLE_DOSSIER_BOOK_PAGE_CHARS", "7000"))),
-            outline_lenses_csv=os.getenv(
-                "ENSEMBLE_DOSSIER_OUTLINE_LENSES",
-                (
-                    "definitions et perimetre,faits etablis et mecanismes,benefices et opportunites,"
-                    "limites et risques,cout et ressources,environnement,societe et politique,"
-                    "aspects techniques ou operationnels,exemples d'application"
-                ),
-            ),
+            outline_lenses_csv=os.getenv("ENSEMBLE_DOSSIER_OUTLINE_LENSES", "definitions,faits,benefices,limites,cout,societe,technique,exemples"),
             outline_refinement_rounds=max(0, int(os.getenv("ENSEMBLE_DOSSIER_OUTLINE_REFINEMENT_ROUNDS", "3"))),
             outline_min_subsections=outline_min_subsections,
             outline_max_subsections=outline_max_subsections,
-            extract_model=os.getenv("ENSEMBLE_DOSSIER_EXTRACT_MODEL", "mistral-small3.2:24b"),
-            verify_model=os.getenv("ENSEMBLE_DOSSIER_VERIFY_MODEL", "qwen2.5:32b"),
-            writer_model=os.getenv("ENSEMBLE_DOSSIER_WRITER_MODEL", "mistral-small3.2:24b"),
-            judge_model=os.getenv("ENSEMBLE_DOSSIER_JUDGE_MODEL", "qwen2.5:32b"),
+            extract_model=os.getenv("ENSEMBLE_DOSSIER_EXTRACT_MODEL", "mistral-large-3:675b"),
+            verify_model=os.getenv("ENSEMBLE_DOSSIER_VERIFY_MODEL", "deepseek-v3.1:671b"),
+            writer_model=os.getenv("ENSEMBLE_DOSSIER_WRITER_MODEL", "mistral-large-3:675b"),
+            judge_model=os.getenv("ENSEMBLE_DOSSIER_JUDGE_MODEL", "deepseek-v3.1:671b"),
             searxng_base_url=os.getenv("ENSEMBLE_SEARXNG_BASE_URL", "http://127.0.0.1:8080"),
             web_max_sub_questions=max(0, int(os.getenv("ENSEMBLE_DOSSIER_MAX_SUBQUESTIONS", "0"))),
             web_max_links_per_subquestion=int(os.getenv("ENSEMBLE_DOSSIER_MAX_LINKS_PER_SUBQUESTION", "240")),
@@ -130,8 +114,8 @@ class DossierConfig:
             writer_iterations=max(1, int(os.getenv("ENSEMBLE_DOSSIER_WRITER_ITERATIONS", "6"))),
             writer_batch_claims=max(6, int(os.getenv("ENSEMBLE_DOSSIER_WRITER_BATCH_CLAIMS", "24"))),
             writer_min_words_per_section=max(400, int(os.getenv("ENSEMBLE_DOSSIER_MIN_WORDS_PER_SECTION", "1400"))),
-            writer_target_words_per_section=max(800, int(os.getenv("ENSEMBLE_DOSSIER_TARGET_WORDS_PER_SECTION", "2200"))),
+            writer_target_words_per_section=max(800, int(os.getenv("ENSEMBLE_DOSSIER_TARGET_WORDS_PER_SECTION", "2500"))),
             strict_no_fallback=env_bool("ENSEMBLE_DOSSIER_STRICT_NO_FALLBACK", False),
             web_search_engine=os.getenv("ENSEMBLE_WEB_SEARCH_ENGINE", "auto").strip().lower(),
-            web_request_delay=float(os.getenv("ENSEMBLE_WEB_REQUEST_DELAY", "1.5")),
+            web_request_delay=float(os.getenv("ENSEMBLE_WEB_REQUEST_DELAY", "3.0")),
         )

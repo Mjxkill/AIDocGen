@@ -21,7 +21,11 @@ class LLMClient:
         max_retries: int = 3,
     ) -> str:
         url = f"{self.config.ollama_base_url.rstrip('/')}/api/chat"
-        ctx_size = min(self.config.context_window, 16384)
+        
+        headers = {}
+        if self.config.ollama_api_key:
+            headers["Authorization"] = f"Bearer {self.config.ollama_api_key}"
+
         payload = {
             "model": model,
             "messages": [
@@ -29,13 +33,16 @@ class LLMClient:
                 {"role": "user", "content": user_prompt},
             ],
             "stream": False,
-            "options": {
-                "temperature": temperature,
-                "num_ctx": ctx_size,
-            },
         }
+        
+        # --- BLINDAGE CLOUD : AUCUNE OPTION SI OLLAMA.COM ---
+        # Le relais cloud ollama.com renvoie 404 si on envoie 'options' (temperature, num_ctx, etc)
+        if "ollama.com" not in url and ":cloud" not in model:
+            payload["options"] = {
+                "temperature": temperature,
+                "num_ctx": min(self.config.context_window, 32000),
+            }
 
-        # Select timeout based on stage
         timeout_val = self.config.planner_timeout_seconds
         if stage in ["writing", "verification", "ranking"]:
             timeout_val = self.config.writer_timeout_seconds
@@ -43,10 +50,10 @@ class LLMClient:
         last_error = None
         for attempt in range(max_retries):
             try:
-                print(f"DEBUG: LLM Call to {model} (ctx: {ctx_size}, stage: {stage}, attempt: {attempt+1})")
+                print(f"DEBUG: LLM Call to {model} (stage: {stage}, attempt: {attempt+1})")
                 start_ts = time.time()
                 async with httpx.AsyncClient(timeout=timeout_val) as client:
-                    resp = await client.post(url, json=payload)
+                    resp = await client.post(url, json=payload, headers=headers)
                     resp.raise_for_status()
                     data = resp.json()
                     content = data.get("message", {}).get("content", "")
@@ -58,13 +65,14 @@ class LLMClient:
                             "timestamp": int(time.time()),
                             "stage": stage,
                             "model": model,
-                            "duration": round(time.time() - start_ts, 2),
+                            "duration": duration,
                             "input_len": len(system_prompt) + len(user_prompt),
                             "output_len": len(content),
                         })
                     return content
             except Exception as e:
                 last_error = e
+                print(f"DEBUG: LLM Attempt {attempt+1} failed: {e}")
                 await asyncio.sleep(2 * (attempt + 1))
         
         raise RuntimeError(f"LLM call failed after {max_retries} attempts: {last_error}")
@@ -77,7 +85,6 @@ class LLMClient:
         llm_logs: list[dict[str, Any]] | None = None,
         schema_hint: Any = None,
     ) -> Any:
-        # Try pure extraction
         cleaned = raw_text.strip()
         if "```json" in cleaned:
             cleaned = cleaned.split("```json")[1].split("```")[0].strip()
@@ -89,19 +96,11 @@ class LLMClient:
         except json.JSONDecodeError:
             pass
             
-        # Repair attempt
-        repair_prompt = f"""You are a JSON fixer. The following text contains invalid JSON. 
-Output ONLY the corrected JSON. No markdown, no comments.
-Original Text:
-{raw_text[:4000]}
-"""
+        repair_prompt = f"You are a JSON fixer. Output ONLY corrected JSON. Original: {raw_text[:4000]}"
         try:
             repaired = await self.ask(model, "Fix JSON", repair_prompt, llm_logs, f"{stage}_repair", temperature=0.1)
             cleaned = repaired.strip()
-            if "```json" in cleaned:
-                cleaned = cleaned.split("```json")[1].split("```")[0].strip()
-            elif "```" in cleaned:
-                cleaned = cleaned.split("```")[1].split("```")[0].strip()
+            if "```json" in cleaned: cleaned = cleaned.split("```json")[1].split("```")[0].strip()
             return json.loads(cleaned)
         except Exception:
             raise ValueError(f"Failed to parse JSON in stage {stage}")

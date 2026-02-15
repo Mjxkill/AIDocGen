@@ -12,83 +12,194 @@ class Writer:
         self.config = config
         self.llm = llm
 
-    async def plan_dossier(self, question: str, detail_level: str, llm_logs: list[dict[str, Any]], prompt_type: str = "generic") -> dict[str, Any]:
-        p_path = Path("prompts") / f"planner_{prompt_type}.txt"
-        if not p_path.exists(): p_path = Path("prompts") / "planner_generic.txt"
+    def parse_markdown_outline(self, text: str) -> list[dict[str, Any]]:
+        """Parse Markdown outline with 3 levels: Parties → Chapters → Sections."""
+        result = []
+        lines = text.split('\n')
         
-        sys_prompt = p_path.read_text(encoding="utf-8").replace("{question}", question).replace("{detail_level}", detail_level)
-        user_prompt = f"Plan accurate structure for: {question}."
+        current_party: dict[str, Any] | None = None
+        current_chapter: dict[str, Any] | None = None
         
-        raw = await self.llm.ask(self.config.planner_model, sys_prompt, user_prompt, llm_logs, "planner", temperature=0.2)
-        return await self.llm.parse_json(raw, self.config.planner_model, "planner", llm_logs)
+        party_regex = r'^#{1,2}\s*(?:Partie|Part)\s*([IVX\d]+)[\s\:\-–—]*\s*(.*?)(?:\s*#|$)'
+        chap_regex = r'^#{1,4}\s*(?:Chapitre|Chapter)\s*[\d\.]*\s*[\:\-\.\s—]*\s*(.*?)(?:\s*#|$)'
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            
+            # Detect Partie Header (## Partie I : Titre)
+            party_match = re.search(party_regex, line, re.IGNORECASE)
+            if party_match:
+                # Save previous chapter if exists
+                if current_chapter and current_chapter.get('sub_sections'):
+                    if current_party:
+                        current_party.setdefault('chapters', []).append(current_chapter)
+                    else:
+                        result.append(current_chapter)
+                current_chapter = None
+                
+                # Create new party
+                party_title = f"Partie {party_match.group(1)}"
+                if party_match.group(2):
+                    party_title += f" : {party_match.group(2).strip()}"
+                current_party = {"party_title": party_title, "chapters": []}
+                result.append(current_party)
+                continue
+            
+            # Detect Chapter Header (### Chapitre 1 : Titre)
+            chap_match = re.search(chap_regex, line, re.IGNORECASE)
+            if chap_match:
+                # Save previous chapter if exists
+                if current_chapter and current_chapter.get('sub_sections'):
+                    if current_party:
+                        current_party.setdefault('chapters', []).append(current_chapter)
+                    else:
+                        result.append(current_chapter)
+                
+                title = chap_match.group(1).strip()
+                if len(title) > 3:
+                    current_chapter = {"chapter_title": title, "sub_sections": []}
+                continue
+            
+            # Detect Section (Bullet points)
+            sec_match = re.search(r'^[*\-]\s*\*{0,2}(?:[\d\.]+)?\s*(.*?)\*{0,2}\s*$', line)
+            if sec_match and current_chapter is not None:
+                sec_title = sec_match.group(1).strip()
+                if len(sec_title) > 3:
+                    current_chapter.setdefault('sub_sections', []).append({"title": sec_title, "brief": "Analyse détaillée."})
+        
+        # Don't forget the last chapter
+        if current_chapter and current_chapter.get('sub_sections'):
+            if current_party:
+                current_party.setdefault('chapters', []).append(current_chapter)
+            else:
+                result.append(current_chapter)
+        
+        # Filter: parties must have chapters, chapters must have sub_sections
+        filtered = []
+        for item in result:
+            if 'party_title' in item:
+                item['chapters'] = [c for c in item.get('chapters', []) if c.get('sub_sections')]
+                if item['chapters']:
+                    filtered.append(item)
+            elif 'chapter_title' in item and item.get('sub_sections'):
+                filtered.append(item)
+        
+        return filtered
 
-    async def write_sections(self, planner: dict[str, Any], claims: list[dict[str, Any]], llm_logs: list[dict[str, Any]], progress_cb: Callable | None, run_dir: Path | None) -> dict[str, Any]:
-        outline = planner.get("master_outline", [])
-        sections_content = []
-        tasks = []
-        for p in outline:
-            for c in p.get("chapters", []):
-                for s in c.get("sub_sections", []):
-                    tasks.append((p.get("party_title", "Partie"), c.get("chapter_title", "Chapitre"), s))
+    def normalize_outline(self, data: Any) -> list[dict[str, Any]]:
+        """Recursive extraction of chapters from any JSON structure."""
+        normalized = []
+        def walk(obj, parent_title=None):
+            if isinstance(obj, dict):
+                title = obj.get("chapter_title") or obj.get("title") or obj.get("titre") or obj.get("part_title") or obj.get("nom") or obj.get("intitule")
+                content = obj.get("sub_sections") or obj.get("sections") or obj.get("chapitres") or obj.get("chapters") or obj.get("contenu") or obj.get("points")
+                if title and isinstance(content, list) and len(content) > 0:
+                    if all(isinstance(x, str) for x in content[:2]):
+                        full_title = f"{parent_title} - {title}" if parent_title else str(title)
+                        normalized.append({"chapter_title": full_title, "sub_sections": [{"title": s, "brief": "Analyse."} for s in content]})
+                    else:
+                        for item in content: walk(item, parent_title=title)
+                else:
+                    for v in obj.values(): walk(v, parent_title=parent_title)
+            elif isinstance(obj, list):
+                for v in obj: walk(v, parent_title=parent_title)
+        walk(data); return normalized
+
+    async def plan_dossier(self, question: str, detail_level: str, llm_logs: list[dict[str, Any]], prompt_type: str = "generic", language: str = "fr", presearch_results: dict[str, Any] | None = None, run_dir: Path | None = None, coder_model_override: str | None = None) -> dict[str, Any]:
+        lang_name = {"fr": "Français", "en": "English", "es": "Español", "de": "Deutsch"}.get(language, "Français")
+        debug_info = {"attempts": [], "planner_prompt": {"system": "", "user": ""}}
         
+        if presearch_results and len(presearch_results) > 0:
+            def sanitize(t): return re.sub(r'http[s]?://\S+', '', str(t or ""))
+            web_context = "\n".join([f"- {sanitize(l.get('title'))}: {sanitize(l.get('snippet'))}" for l in presearch_results[:15]])
+        else: web_context = "Pas de données web."
+
+        # STEP 1: RICH DRAFT
+        draft_sys = f"Tu es un Expert Scientifique. Mission: plan d'enquête MASSAL (15-20 chapitres) en {lang_name}."
+        draft_user = f"Sujet: {question}\nWEB:\n{web_context}\n\nRéfléchis (Thinking) puis donne le sommaire détaillé en Markdown après '---'."
+        debug_info["planner_prompt"] = {"system": draft_sys, "user": draft_user}
+        
+        full_res = await self.llm.ask(self.config.planner_model, draft_sys, draft_user, llm_logs, "planner_rich_draft", temperature=0.8)
+        debug_info["planner_response_raw"] = full_res
+        if run_dir: (run_dir / "planner_draft.txt").write_text(full_res, encoding="utf-8")
+        draft_md = full_res.split("---", 1)[-1] if "---" in full_res else full_res
+        
+        # --- STEP 2: DETERMINISTIC EXTRACTION (PRIMARY) ---
+        if run_dir: await emit_progress(None, run_dir, "planner", "Extraction du plan...")
+        master_outline = self.parse_markdown_outline(draft_md)
+        
+        if len(master_outline) >= 5:
+            if run_dir: (run_dir / "planner_debug.json").write_text(json.dumps(debug_info, ensure_ascii=False, indent=2))
+            return {"question_reformulated": question, "master_outline": master_outline, "sub_questions": []}
+
+        # --- STEP 3: IA FALLBACK ---
+        coder_model = coder_model_override or self.config.planner_book_model_4_json
+        for attempt in range(2):
+            if run_dir: await emit_progress(None, run_dir, "planner", f"Recours IA ({attempt+1}/2)")
+            raw_json = await self.llm.ask(coder_model, "Ingénieur JSON.", f"Convertis en JSON master_outline :\n{draft_md}", llm_logs, "planner_crystallize", temperature=0.1)
+            attempt_info = {"attempt": attempt + 1, "raw_response": raw_json[:2000], "success": False}
+            try:
+                parsed = await self.llm.parse_json(raw_json, coder_model, "planner", llm_logs)
+                master_outline = self.normalize_outline(parsed)
+                attempt_info["success"] = True
+                attempt_info["chapters_found"] = len(master_outline)
+                debug_info["attempts"].append(attempt_info)
+                if len(master_outline) >= 3:
+                    if run_dir: (run_dir / "planner_debug.json").write_text(json.dumps(debug_info, ensure_ascii=False, indent=2))
+                    return {"question_reformulated": question, "master_outline": master_outline, "sub_questions": []}
+            except Exception as e:
+                attempt_info["error"] = str(e)
+            debug_info["attempts"].append(attempt_info)
+        
+        if run_dir: (run_dir / "planner_debug.json").write_text(json.dumps(debug_info, ensure_ascii=False, indent=2))
+        raise RuntimeError("Échec total de l'extraction du plan.")
+
+    async def write_sections(self, planner: dict[str, Any], claims: list[dict[str, Any]], llm_logs: list[dict[str, Any]], progress_cb: Callable | None, run_dir: Path | None, language: str = "fr") -> dict[str, Any]:
+        outline = planner.get("master_outline", [])
+        lang_name = {"fr": "Français", "en": "English", "es": "Español", "de": "Deutsch"}.get(language, "Français")
+        tasks = []
+        
+        # Handle both 2-level (chapters with sub_sections) and 3-level (parties with chapters) structures
+        for item in outline:
+            if "chapters" in item:
+                # 3-level structure: Party -> Chapters -> Sections
+                p_title = item.get("party_title", "")
+                for chapter in item.get("chapters", []):
+                    c_title = chapter.get("chapter_title", "")
+                    for s in chapter.get("sub_sections", []):
+                        tasks.append((p_title, c_title, s))
+            else:
+                # 2-level structure: Chapter -> Sections (backward compatible)
+                for s in item.get("sub_sections", []):
+                    tasks.append(("", item.get("chapter_title", ""), s))
+        
+        sections_content = []
         for idx, (p_title, c_title, sec) in enumerate(tasks, 1):
             s_title = sec.get("title")
-            if progress_cb:
-                await emit_progress(progress_cb, run_dir, "writing", f"Writing {idx}/{len(tasks)}: {s_title}")
-            
-            keywords = s_title.lower().split()
-            relevant = [c for c in claims if any(k in c.get("claim_text", "").lower() for k in keywords[:3])]
+            if progress_cb: await emit_progress(progress_cb, run_dir, "writing", f"Writing {idx}/{len(tasks)}: {s_title}")
+            keywords = s_title.lower().split(); relevant = [c for c in claims if any(k in c.get("claim_text", "").lower() for k in keywords[:3])]
             context = json.dumps(relevant[:30], ensure_ascii=False)
-
-            prompt = f"Dissertation Section: {s_title}\nPartie: {p_title}\nChapitre: {c_title}\nBrief: {sec.get('brief')}\nContext: {context}\n\nRules: Technical depth, min 1000 words, cite [CLM-id]."
-            content = await self.llm.ask(self.config.writer_model, "Academic Writer", prompt, llm_logs, "writing")
+            prompt = f"Dissertation Section: {s_title}\nPartie: {p_title}\nChapitre: {c_title}\nBrief: {sec.get('brief')}\nContext: {context}\n\nRules: Technical depth, min 1000 words, cite [CLM-id]. LANGUAGE: {lang_name}."
+            content = await self.llm.ask(self.config.writer_model, f"Academic {lang_name} Writer", prompt, llm_logs, "writing")
             sections_content.append({"type": "section", "p_title": p_title, "c_title": c_title, "s_title": s_title, "content": content})
-
         return {"sections": sections_content}
 
     async def assemble_report(self, planner: dict[str, Any], sections_payload: dict[str, Any], claims: list[dict[str, Any]], verdicts: dict[str, Any], corpus: dict[str, Any]) -> tuple[str, str]:
-        title = planner.get("question_reformulated", "Dossier")
-        sections = sections_payload.get("sections", [])
-        
-        # 1. Table of Contents
-        toc = ["## Table des Matières\n"]
-        current_p, current_c = "", ""
+        title = planner.get("question_reformulated", "Dossier"); sections = sections_payload.get("sections", [])
+        toc = ["## Table des Matières\n"]; current_c = "__START__"
         for s in sections:
-            if s["p_title"] != current_p:
-                current_p = s["p_title"]
-                toc.append(f"- [{current_p}](#{markdown_anchor(current_p)})")
-            if s["c_title"] != current_c:
-                current_c = s["c_title"]
-                toc.append(f"  - [{current_c}](#{markdown_anchor(current_c)})")
-            toc.append(f"    - [{s['s_title']}](#{markdown_anchor(s['s_title'])})")
-
-        # 2. Main Report
-        body = [f"# {title}\n", "\n".join(toc), "\n---\n"]
-        current_p, current_c = "", ""
+            if s["c_title"] != current_c: current_c = s["c_title"]; toc.append(f"- [{current_c}](#{markdown_anchor(current_c)})")
+            toc.append(f"  - [{s['s_title']}](#{markdown_anchor(s['s_title'])})")
+        body = [f"# {title}\n", "\n".join(toc), "\n---\n"]; current_c = "__START__"
         for s in sections:
-            if s["p_title"] != current_p:
-                current_p = s["p_title"]
-                body.append(f"\n# {current_p}\n<a name='{markdown_anchor(current_p)}'></a>")
             if s["c_title"] != current_c:
-                current_c = s["c_title"]
-                body.append(f"\n## {current_c}\n<a name='{markdown_anchor(current_c)}'></a>")
-            
-            content = s["content"]
-            # REFINEMENT: Citations [CLM-xxx] -> [[*]](annexes.md#CLM-xxx)
-            content = re.sub(r"\[CLM-([a-f0-9-]+)\]", r"[[*]](annexes.md#CLM-\1)", content)
+                current_c = s["c_title"]; body.append(f"\n## {current_c}\n<a name='{markdown_anchor(current_c)}'></a>")
+            content = re.sub(r"\[CLM-([a-f0-9-]+)\]", r"[[*]](annexes.md#CLM-\1)", s["content"])
             body.append(f"\n### {s['s_title']}\n<a name='{markdown_anchor(s['s_title'])}'></a>\n\n{content}\n")
-
-        # 3. Annexes
-        annex = ["# Annexes Techniques : Preuves\n", "> Retrouvez ici les sources et validations détaillées.\n\n"]
-        v_dict = {v["claim_id"]: v for v in verdicts.get("verdicts", [])}
-        src_dict = {s["source_id"]: s for s in corpus.get("sources", [])}
-        
+        annex = ["# Annexes Techniques\n"]; v_dict = {v["claim_id"]: v for v in verdicts.get("verdicts", [])}; src_dict = {s["source_id"]: s for s in corpus.get("sources", [])}
         for c in claims:
-            cid = c["claim_id"]
-            v = v_dict.get(cid, {})
-            src = src_dict.get(c.get("source_id"), {})
-            annex.append(f"<a name='CLM-{cid}'></a>\n### Preuve {cid}\n- **Fait :** {c['claim_text']}\n- **Status :** {v.get('status', 'UNCERTAIN')}\n- **Source :** [{src.get('title') or 'Lien'}]({src.get('canonical_url', '#')})\n")
-            if v.get("justification"): annex.append(f"- **Analyse :** {v['justification']}\n")
-            annex.append("\n---\n")
-
+            cid = c["claim_id"]; v = v_dict.get(cid, {}); src = src_dict.get(c.get("source_id"), {})
+            annex.append(f"<a name='CLM-{cid}'></a>\n### Preuve {cid}\n- **Fait :** {c['claim_text']}\n- **Source :** [{src.get('title') or 'Lien'}]({src.get('canonical_url', '#')})\n\n---\n")
         return "\n".join(body), "\n".join(annex)
