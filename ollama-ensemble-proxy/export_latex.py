@@ -3,23 +3,20 @@ import re
 import subprocess
 from pathlib import Path
 
-def escape_latex_text(text):
-    """Escape LaTeX special characters in regular text, preserving existing LaTeX."""
+def escape_latex_special_chars(text):
+    """Escape LaTeX special characters (minimal set for regular text)."""
     if not text: return ""
-    # Don't process if already contains LaTeX commands
-    if '\\textbf{' in text or '\\textit{' in text or '\\begin{' in text or '\\item' in text:
-        return text
-    
-    # Escape special characters (except backslash which we handle carefully)
+    # Order matters: & must be escaped first
     replacements = [
         ('&', r'\&'),
         ('%', r'\%'),
         ('$', r'\$'),
         ('#', r'\#'),
-        ('~', r'\textasciitilde{}'),
     ]
     for old, new in replacements:
         text = text.replace(old, new)
+    # Escape underscores not already escaped
+    text = re.sub(r'(?<!\\)_', r'\_', text)
     return text
 
 def convert_markdown_inline(text):
@@ -27,32 +24,23 @@ def convert_markdown_inline(text):
     if not text: return ""
     
     # Remove markdown links: [text](url) -> text
-    text = re.sub(r'\[\[?\*?\]?\]\([^)]+\)', '', text)  # Remove [*](url)
-    text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)  # [text](url) -> text
+    text = re.sub(r'\[\[?\*?\]?\]\([^)]+\)', '', text)
+    text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)
     
-    # Handle bold and italic: ***text*** -> \textbf{\textit{text}}
+    # Handle bold and italic: ***text***
     text = re.sub(r'\*\*\*([^*]+?)\*\*\*', r'\\textbf{\\textit{\1}}', text)
-    # Handle bold: **text** -> \textbf{text}
+    # Handle bold: **text**
     text = re.sub(r'\*\*([^*]+?)\*\*', r'\\textbf{\1}', text)
-    # Handle italic: *text* -> \textit{text}
+    # Handle italic: *text*
     text = re.sub(r'\*([^*]+?)\*', r'\\textit{\1}', text)
     
     return text
 
-def process_text(text):
-    """Process text, escaping special chars and converting markdown."""
+def process_inline_text(text):
+    """Full processing: markdown + escape special chars."""
     if not text: return ""
-    # First convert markdown formatting
     text = convert_markdown_inline(text)
-    # Then escape remaining special chars
-    text = text.replace('&', r'\&')
-    text = text.replace('%', r'\%')
-    text = text.replace('$', r'\$')
-    text = text.replace('#', r'\#')
-    text = text.replace('~', r'\textasciitilde{}')
-    # Handle underscores carefully (not in existing LaTeX commands)
-    # Only escape underscores that are not part of LaTeX commands
-    text = re.sub(r'(?<!\\)_', r'\_', text)
+    text = escape_latex_special_chars(text)
     return text
 
 def estimate_text_width(text):
@@ -61,21 +49,30 @@ def estimate_text_width(text):
     return len(text) * 0.22
 
 def convert_table_cell(cell):
-    """Process a table cell."""
+    """Process a table cell content."""
     if not cell: return ""
+    
+    # Handle HTML tags first
+    cell = cell.replace('<br>', r' \\ ')
+    cell = cell.replace('<BR>', r' \\ ')
+    cell = re.sub(r'<[^>]+>', '', cell)  # Remove other HTML tags
+    
     # Remove markdown links
     cell = re.sub(r'\[\[?\*?\]?\]\([^)]+\)', '', cell)
     cell = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', cell)
+    
     # Convert markdown formatting
     cell = re.sub(r'\*\*\*([^*]+?)\*\*\*', r'\\textbf{\\textit{\1}}', cell)
     cell = re.sub(r'\*\*([^*]+?)\*\*', r'\\textbf{\1}', cell)
     cell = re.sub(r'\*([^*]+?)\*', r'\\textit{\1}', cell)
+    
     # Escape special chars
     cell = cell.replace('&', r'\&')
     cell = cell.replace('%', r'\%')
     cell = cell.replace('$', r'\$')
     cell = cell.replace('#', r'\#')
     cell = re.sub(r'(?<!\\)_', r'\_', cell)
+    
     return cell
 
 def convert_markdown_table_to_latex(table_lines, page_width=15.0):
@@ -88,6 +85,7 @@ def convert_markdown_table_to_latex(table_lines, page_width=15.0):
         line = line.strip()
         if not line or not line.startswith('|'):
             continue
+        # Skip separator lines
         if re.match(r'^\|[\s\-:|]+\|\s*$', line):
             continue
         cells = line.split('|')
@@ -113,8 +111,6 @@ def convert_markdown_table_to_latex(table_lines, page_width=15.0):
         col_widths.append(max_width)
     
     total_width = sum(col_widths)
-    
-    # Use tabularx for wide tables
     use_tabularx = total_width > page_width
     col_spec = 'X' * num_cols if use_tabularx else 'l' * num_cols
     
@@ -157,13 +153,54 @@ def process_body(text):
     table_buffer = []
     in_table = False
     in_list = False
+    in_code = False
+    code_lang = ""
     
-    for line in lines:
-        is_table_line = line.strip().startswith('|') and line.count('|') >= 2
-        is_list_item = line.strip().startswith('- ')
-        is_empty = line.strip() == ''
+    i = 0
+    while i < len(lines):
+        line = lines[i]
         
-        # Handle tables
+        # === CODE BLOCKS ===
+        if line.strip().startswith('```'):
+            if not in_code:
+                # Start code block
+                if in_list:
+                    result_lines.append(r'\end{itemize}')
+                    result_lines.append('')
+                    in_list = False
+                if in_table and table_buffer:
+                    latex_table = convert_markdown_table_to_latex(table_buffer)
+                    if latex_table:
+                        result_lines.append(latex_table)
+                    table_buffer = []
+                    in_table = False
+                
+                in_code = True
+                code_lang = line.strip()[3:].strip()  # Extract language
+                result_lines.append(r'\begin{lstlisting}[basicstyle=\ttfamily\small]')
+            else:
+                # End code block
+                in_code = False
+                result_lines.append(r'\end{lstlisting}')
+                result_lines.append('')
+            i += 1
+            continue
+        
+        if in_code:
+            # Inside code block - output raw, only escape minimal chars
+            code_line = line
+            # Escape backslash first, then other special chars
+            code_line = code_line.replace('\\', r'\textbackslash{}')
+            code_line = code_line.replace('{', r'\{')
+            code_line = code_line.replace('}', r'\}')
+            # Don't escape _ & % $ # in code (they should appear as-is in lstlisting)
+            result_lines.append(code_line)
+            i += 1
+            continue
+        
+        # === TABLES ===
+        is_table_line = line.strip().startswith('|') and line.count('|') >= 2
+        
         if is_table_line:
             if in_list:
                 result_lines.append(r'\end{itemize}')
@@ -171,6 +208,7 @@ def process_body(text):
                 in_list = False
             in_table = True
             table_buffer.append(line)
+            i += 1
             continue
         else:
             if in_table and table_buffer:
@@ -178,21 +216,27 @@ def process_body(text):
                 if latex_table:
                     result_lines.append(latex_table)
                 else:
-                    result_lines.extend(table_buffer)
+                    # Fallback: output raw lines
+                    for tbl in table_buffer:
+                        result_lines.append(process_inline_text(tbl))
                 table_buffer = []
                 in_table = False
         
         # Skip markdown headers
         if re.match(r'^\s*#{1,6}\s', line):
+            i += 1
             continue
         
-        # Handle lists
+        # === LISTS ===
+        is_list_item = line.strip().startswith('- ')
+        is_empty = line.strip() == ''
+        
         if is_list_item:
             if not in_list:
                 result_lines.append(r'\begin{itemize}')
                 in_list = True
             item_text = line.strip()[2:]  # Remove '- '
-            item_text = process_text(item_text)
+            item_text = process_inline_text(item_text)
             result_lines.append(f'  \\item {item_text}')
         elif is_empty:
             if in_list:
@@ -203,28 +247,29 @@ def process_body(text):
                 result_lines.append('')
         else:
             if in_list:
-                # Check if line starts with spaces (continuation)
-                if line.startswith('  '):
-                    result_lines.append(f'  {process_text(line.strip())}')
+                # Check if continuation (indented)
+                if line.startswith('  ') and line.strip():
+                    cont_text = process_inline_text(line.strip())
+                    result_lines.append(f'  {cont_text}')
                 else:
                     result_lines.append(r'\end{itemize}')
                     result_lines.append('')
                     in_list = False
-                    result_lines.append(process_text(line))
+                    result_lines.append(process_inline_text(line))
             else:
-                result_lines.append(process_text(line))
+                result_lines.append(process_inline_text(line))
+        
+        i += 1
     
-    # Close any remaining list
+    # Close any remaining open environments
     if in_list:
         result_lines.append(r'\end{itemize}')
-    
-    # Handle any remaining table
+    if in_code:
+        result_lines.append(r'\end{lstlisting}')
     if in_table and table_buffer:
         latex_table = convert_markdown_table_to_latex(table_buffer)
         if latex_table:
             result_lines.append(latex_table)
-        else:
-            result_lines.extend(table_buffer)
     
     return '\n'.join(result_lines)
 
@@ -254,6 +299,9 @@ def generate_latex(run_id, data_dir="data/dossiers"):
         r"\usepackage{booktabs}",
         r"\usepackage{tabularx}",
         r"\usepackage{amsmath}",
+        r"\usepackage{listings}",
+        r"\lstset{breaklines=true,frame=single,backgroundcolor=\color{gray!10}}",
+        r"\usepackage{xcolor}",
         r"\geometry{margin=2.5cm}",
         f"\\title{{{clean_title(doc_title)}}}",
         r"\author{AIDocGen}",
