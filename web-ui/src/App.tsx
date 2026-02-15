@@ -3,151 +3,205 @@ import axios from 'axios';
 import './App.css';
 
 // --- Types ---
-interface Metrics {
-  cpu_percent: number;
-  ram_percent: number;
-  gpus: { util: number; mem_used: number; mem_total: number }[];
-}
-
+interface Metrics { cpu_percent: number; ram_percent: number; gpus: any[]; }
 interface RunStatus {
-  run_id: string;
-  question: string;
-  state: string;
-  stage: string;
+  run_id: string; question: string; state: string; stage: string;
   events: { message: string, timestamp: number }[];
-  error?: string;
-  updated_at: number;
-  sources_count?: number;
-  claims_count?: number;
-  prompt_type?: string;
+  updated_at: number; language?: string; planner_model?: string;
   detail_level?: string;
-  planner_model?: string;
 }
 
-// --- Icons (Simple SVG) ---
 const Icon = ({ name }: { name: string }) => {
-  const icons: Record<string, any> = {
+  const icons: any = {
     dashboard: <path d="M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z"/>,
-    models: <path d="M12 2L1 21h22L12 2zm0 3.45l8.27 14.3H3.73L12 5.45zM11 16h2v2h-2v-2zm0-7h2v5h-2V9z"/>,
-    config: <path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/>
+    models: <path d="M12 2L1 21h22L12 2zm0 3.45l8.27 14.3H3.73L12 5.45zM11 16h2v2h-2v-2zm0-7h2v5h-2V9z"/>
   };
-  return <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">{icons[name] || null}</svg>;
+  return <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">{icons[name]}</svg>;
 };
 
-// --- Sub-Components ---
+const Login = ({ onLogin }: { onLogin: () => void }) => {
+  const [u, setU] = useState(''); const [p, setP] = useState('');
+  const handle = async (e: any) => {
+    e.preventDefault();
+    const params = new URLSearchParams(); params.append('username', u); params.append('password', p);
+    try {
+      const res = await axios.post('/v1/auth/login', params);
+      localStorage.setItem('token', res.data.access_token);
+      axios.defaults.headers.common['Authorization'] = `Bearer ${res.data.access_token}`;
+      onLogin();
+      window.location.reload();
+    } catch { alert('Erreur login'); }
+  };
+  return (
+    <div className="login-bg">
+      <form onSubmit={handle} className="create-card" style={{width:'400px', padding:'40px'}}>
+        <h2>📚 AIDocGen Login</h2>
+        <input className="btn-sm" style={{width:'100%', marginBottom:'10px'}} placeholder="User" value={u} onChange={e=>setU(e.target.value)} />
+        <input className="btn-sm" style={{width:'100%', marginBottom:'20px'}} type="password" placeholder="Pass" value={p} onChange={e=>setP(e.target.value)} />
+        <button className="btn-primary" style={{width:'100%'}}>Entrer</button>
+      </form>
+    </div>
+  );
+};
+
+const ModelManager = () => {
+  const [srv, setSrv] = useState<any[]>([]);
+  const [edit, setEdit] = useState({ name: '', url: '' });
+  const refresh = () => axios.get('/v1/servers').then(r => setSrv(r.data));
+  useEffect(() => { refresh(); }, []);
+  const save = () => axios.post('/v1/servers', edit).then(() => { setEdit({name:'', url:''}); refresh(); });
+  return (
+    <div style={{display:'grid', gridTemplateColumns:'300px 1fr', gap:'20px'}}>
+      <div className="create-card">
+        <h3>🖥️ Serveurs</h3>
+        {srv.map((s,i) => <div key={i} className="nav-item"><strong>{s.name}</strong><br/><small>{s.url}</small></div>)}
+        <hr/>
+        <input className="btn-sm" placeholder="Nom" value={edit.name} onChange={e=>setEdit({...edit, name:e.target.value})} style={{width:'100%', marginBottom:'5px'}}/>
+        <input className="btn-sm" placeholder="URL" value={edit.url} onChange={e=>setEdit({...edit, url:e.target.value})} style={{width:'100%', marginBottom:'10px'}}/>
+        <button className="btn-primary" onClick={save} style={{width:'100%'}}>Ajouter</button>
+      </div>
+    </div>
+  );
+};
 
 const VisualPlanEditor = ({ runId, onClose, onApproved }: { runId: string, onClose: () => void, onApproved: () => void }) => {
   const [planner, setPlanner] = useState<any>(null);
-  const [loading, setLoading] = useState(true);
-
+  const [debug, setDebug] = useState<any>(null);
+  const [tab, setTab] = useState('plan');
+  const [load, setLoad] = useState(true);
   useEffect(() => {
-    axios.get(`/v1/dossier/runs/${runId}/planner`)
-      .then(res => { setPlanner(res.data); setLoading(false); })
-      .catch(() => setLoading(false));
+    Promise.all([
+      axios.get(`/v1/dossier/runs/${runId}/planner`).catch(()=>({data:null})),
+      axios.get(`/v1/dossier/runs/${runId}/planner/debug`).catch(()=>({data:null}))
+    ]).then(([p, d]) => { setPlanner(p.data); setDebug(d.data); setLoad(false); })
+      .catch(() => setLoad(false));
   }, [runId]);
+  const updateSection = (pIdx: number, sIdx: number, val: string, cIdx?: number) => {
+    const next = { ...planner };
+    if (cIdx !== undefined) next.master_outline[pIdx].chapters[cIdx].sub_sections[sIdx].title = val;
+    else next.master_outline[pIdx].sub_sections[sIdx].title = val;
+    setPlanner(next);
+  };
 
-  const updatePlanner = (newData: any) => setPlanner({ ...planner, master_outline: newData });
+  const updateChapterTitle = (pIdx: number, val: string, cIdx?: number) => {
+    const next = { ...planner };
+    if (cIdx !== undefined) next.master_outline[pIdx].chapters[cIdx].chapter_title = val;
+    else next.master_outline[pIdx].chapter_title = val;
+    setPlanner(next);
+  };
+
+  const updatePartyTitle = (pIdx: number, val: string) => {
+    const next = { ...planner };
+    next.master_outline[pIdx].party_title = val;
+    setPlanner(next);
+  };
+
+  const addSection = (pIdx: number, cIdx?: number) => {
+    const next = { ...planner };
+    const newSec = { title: "Nouvelle section", brief: "Détail technique." };
+    if (cIdx !== undefined) next.master_outline[pIdx].chapters[cIdx].sub_sections.push(newSec);
+    else next.master_outline[pIdx].sub_sections.push(newSec);
+    setPlanner(next);
+  };
+
+  const removeSection = (pIdx: number, sIdx: number, cIdx?: number) => {
+    const next = { ...planner };
+    if (cIdx !== undefined) next.master_outline[pIdx].chapters[cIdx].sub_sections.splice(sIdx, 1);
+    else next.master_outline[pIdx].sub_sections.splice(sIdx, 1);
+    setPlanner(next);
+  };
+
+  const addChapter = (pIdx: number) => {
+    const next = { ...planner };
+    const newChap = { chapter_title: "Nouveau Chapitre", sub_sections: [{ title: "Section 1", brief: "Détail." }] };
+    if (next.master_outline[pIdx].chapters) next.master_outline[pIdx].chapters.push(newChap);
+    else next.master_outline.splice(pIdx + 1, 0, newChap);
+    setPlanner(next);
+  };
+
+  const removeChapter = (pIdx: number, cIdx?: number) => {
+    const next = { ...planner };
+    if (cIdx !== undefined) next.master_outline[pIdx].chapters.splice(cIdx, 1);
+    else next.master_outline.splice(pIdx, 1);
+    setPlanner(next);
+  };
 
   const addParty = () => {
-    const newOutline = [...(planner.master_outline || []), { party_title: "Nouvelle Partie", chapters: [] }];
-    updatePlanner(newOutline);
-  };
-  const deleteParty = (pIdx: number) => {
-    const newOutline = planner.master_outline.filter((_: any, i: number) => i !== pIdx);
-    updatePlanner(newOutline);
-  };
-  const addChapter = (pIdx: number) => {
-    const newOutline = [...planner.master_outline];
-    newOutline[pIdx].chapters.push({ chapter_title: "Nouveau Chapitre", sub_sections: [] });
-    updatePlanner(newOutline);
-  };
-  const deleteChapter = (pIdx: number, cIdx: number) => {
-    const newOutline = [...planner.master_outline];
-    newOutline[pIdx].chapters = newOutline[pIdx].chapters.filter((_: any, i: number) => i !== cIdx);
-    updatePlanner(newOutline);
-  };
-  const addSection = (pIdx: number, cIdx: number) => {
-    const newOutline = [...planner.master_outline];
-    newOutline[pIdx].chapters[cIdx].sub_sections.push({ title: "Nouvelle Section", brief: "" });
-    updatePlanner(newOutline);
-  };
-  const deleteSection = (pIdx: number, cIdx: number, sIdx: number) => {
-    const newOutline = [...planner.master_outline];
-    newOutline[pIdx].chapters[cIdx].sub_sections = newOutline[pIdx].chapters[cIdx].sub_sections.filter((_: any, i: number) => i !== sIdx);
-    updatePlanner(newOutline);
+    const next = { ...planner };
+    next.master_outline.push({ party_title: "Nouvelle Partie", chapters: [{ chapter_title: "Chapitre 1", sub_sections: [{ title: "Section 1", brief: "Détail." }] }] });
+    setPlanner(next);
   };
 
-  const handleSave = async () => {
-    try {
-      await axios.post(`/v1/dossier/runs/${runId}/planner`, planner);
-      alert("Sauvegardé !");
-    } catch (err) { alert("Erreur"); }
-  };
-
-  const handleApprove = async () => {
-    await handleSave();
-    await axios.post(`/v1/dossier/runs/${runId}/approve`);
-    onApproved();
-  };
-
-  if (loading) return <div className="detail-overlay"><div className="detail-panel"><div className="panel-body">Chargement...</div></div></div>;
-  if (!planner) return null;
-
+  const save = async () => { if (!planner) return; await axios.post(`/v1/dossier/runs/${runId}/planner`, planner); alert('Plan sauvé'); };
+  if (load) return <div className="detail-overlay">Chargement...</div>;
   return (
     <div className="detail-overlay">
-      <div className="detail-panel" style={{width: '900px'}}>
+      <div className="detail-panel" style={{width:'1000px'}}>
         <div className="panel-header">
-          <h2>📝 Éditeur du Sommaire</h2>
-          <div className="action-bar">
+          <div style={{display:'flex', gap:'10px'}}>
+            <button className={`nav-item ${tab==='plan'?'active':''}`} style={{color:tab==='plan'?'#fff':'#000'}} onClick={()=>setTab('plan')}>Sommaire</button>
+            <button className={`nav-item ${tab==='debug'?'active':''}`} style={{color:tab==='debug'?'#fff':'#000'}} onClick={()=>setTab('debug')}>Debug 🛠️</button>
+          </div>
+          <div style={{display:'flex', gap:'10px'}}>
+            <button onClick={addParty} className="btn-sm btn-outline">➕ Partie</button>
             <button onClick={onClose} className="btn-sm">Fermer</button>
-            <button onClick={handleSave} className="btn-sm btn-outline">Sauver</button>
-            <button onClick={handleApprove} className="btn-primary">🚀 Lancer Rédaction</button>
+            <button onClick={save} className="btn-sm btn-outline">Sauver</button>
+            <button onClick={async ()=>{ await save(); await axios.post(`/v1/dossier/runs/${runId}/approve`); onApproved(); }} className="btn-primary">🚀 Lancer</button>
           </div>
         </div>
         <div className="panel-body">
-          <div className="outline-scroll">
-            {planner.master_outline.map((party: any, pIdx: number) => (
-              <div key={pIdx} className="p-item" style={{background: '#f8fafc', padding: '15px', borderRadius: '8px', border: '1px solid #e2e8f0'}}>
-                <div style={{display: 'flex', gap: '10px', marginBottom: '10px'}}>
-                  <input style={{flex: 1, fontWeight: 'bold', fontSize: '16px', border: 'none', background: 'transparent'}} value={party.party_title} onChange={e => {
-                    const newOutline = [...planner.master_outline];
-                    newOutline[pIdx].party_title = e.target.value;
-                    updatePlanner(newOutline);
-                  }} />
-                  <button className="btn-sm btn-danger" onClick={() => deleteParty(pIdx)}>✕</button>
-                </div>
-                <div style={{paddingLeft: '20px', borderLeft: '2px dashed #cbd5e1'}}>
-                  {party.chapters.map((chap: any, cIdx: number) => (
-                    <div key={cIdx} style={{marginBottom: '15px'}}>
-                      <div style={{display: 'flex', gap: '10px', marginBottom: '5px'}}>
-                        <input style={{flex: 1, fontWeight: '600', border: 'none', background: 'transparent'}} value={chap.chapter_title} onChange={e => {
-                          const newOutline = [...planner.master_outline];
-                          newOutline[pIdx].chapters[cIdx].chapter_title = e.target.value;
-                          updatePlanner(newOutline);
-                        }} />
-                        <button className="btn-sm btn-danger" onClick={() => deleteChapter(pIdx, cIdx)}>✕</button>
+          {tab === 'plan' ? (
+            <div className="outline-scroll">
+              {Array.isArray(planner?.master_outline) ? planner.master_outline.map((item: any, pIdx: number) => (
+                <div key={pIdx} className="p-item" style={{background:'#f8fafc', padding:'15px', borderRadius:'8px', marginBottom:'15px'}}>
+                  <div style={{display:'flex', gap:'10px', marginBottom:'10px', alignItems:'center'}}>
+                    <span style={{fontSize:'14px', fontWeight:'bold', color:'#2563eb', minWidth:'80px'}}>Partie {pIdx + 1}</span>
+                    <input className="btn-sm" style={{fontWeight:'bold', fontSize:'15px', flex:1, background:'#fff'}} value={item.party_title || item.chapter_title} onChange={e => item.party_title ? updatePartyTitle(pIdx, e.target.value) : updateChapterTitle(pIdx, e.target.value)} />
+                    <button className="btn-sm btn-danger" onClick={() => removeChapter(pIdx)}>🗑️</button>
+                  </div>
+                  <div style={{paddingLeft:'10px'}}>
+                    {Array.isArray(item.chapters) ? item.chapters.map((c:any, ci:number)=>(
+                      <div key={ci} style={{marginBottom:'12px', borderLeft:'3px solid #2563eb', paddingLeft:'12px', background:'#fff', padding:'10px', borderRadius:'4px'}}>
+                        <div style={{display:'flex', gap:'10px', marginBottom:'8px', alignItems:'center'}}>
+                          <span style={{fontSize:'13px', fontWeight:'600', color:'#1e40af', minWidth:'90px'}}>Chapitre {ci + 1}</span>
+                          <input className="btn-sm" style={{fontWeight:'600', flex:1, fontSize:'14px'}} value={c.chapter_title} onChange={e => updateChapterTitle(pIdx, e.target.value, ci)} />
+                          <button className="btn-sm btn-danger" onClick={() => removeChapter(pIdx, ci)}>x</button>
+                        </div>
+                        <div style={{paddingLeft:'20px'}}>
+                          {Array.isArray(c.sub_sections) && c.sub_sections.map((s:any, si:number)=>(
+                            <div key={si} style={{display:'flex', gap:'8px', marginBottom:'4px', alignItems:'center'}}>
+                              <span style={{fontSize:'11px', color:'#64748b', minWidth:'40px'}}>{ci + 1}.{si + 1}</span>
+                              <input className="btn-sm" style={{flex:1, fontSize:'12px', color:'#475569'}} value={s.title} onChange={e=>updateSection(pIdx, si, e.target.value, ci)} />
+                              <button className="btn-sm" onClick={() => removeSection(pIdx, si, ci)} style={{padding:'0 6px', opacity:0.4, fontSize:'10px'}}>x</button>
+                            </div>
+                          ))}
+                          <button className="btn-sm btn-outline" style={{fontSize:'10px', marginTop:'6px', marginLeft:'40px'}} onClick={() => addSection(pIdx, ci)}>+ Section</button>
+                        </div>
                       </div>
-                      <div style={{paddingLeft: '20px'}}>
-                        {chap.sub_sections.map((sec: any, sIdx: number) => (
-                          <div key={sIdx} style={{display: 'flex', gap: '10px', marginBottom: '5px'}}>
-                            <input style={{flex: 1, fontSize: '13px', border: '1px solid #e2e8f0', borderRadius: '4px', padding: '4px 8px'}} value={sec.title} onChange={e => {
-                              const newOutline = [...planner.master_outline];
-                              newOutline[pIdx].chapters[cIdx].sub_sections[sIdx].title = e.target.value;
-                              updatePlanner(newOutline);
-                            }} />
-                            <button className="btn-sm btn-danger" onClick={() => deleteSection(pIdx, cIdx, sIdx)}>✕</button>
+                    )) : (
+                      <>
+                        {Array.isArray(item.sub_sections) && item.sub_sections.map((s:any, si:number)=>(
+                          <div key={si} style={{display:'flex', gap:'8px', marginBottom:'4px', alignItems:'center', paddingLeft:'20px'}}>
+                            <span style={{fontSize:'11px', color:'#64748b', minWidth:'40px'}}>{pIdx + 1}.{si + 1}</span>
+                            <input className="btn-sm" style={{flex:1, fontSize:'12px', color:'#475569'}} value={s.title} onChange={e=>updateSection(pIdx, si, e.target.value)} />
+                            <button className="btn-sm" onClick={() => removeSection(pIdx, si)} style={{padding:'0 6px', opacity:0.4, fontSize:'10px'}}>x</button>
                           </div>
                         ))}
-                        <button className="btn-sm" onClick={() => addSection(pIdx, cIdx)}>+ Section</button>
-                      </div>
-                    </div>
-                  ))}
-                  <button className="btn-sm btn-outline" onClick={() => addChapter(pIdx)}>+ Chapitre</button>
+                        <button className="btn-sm btn-outline" style={{fontSize:'10px', marginTop:'6px', marginLeft:'60px'}} onClick={() => addSection(pIdx)}>+ Section</button>
+                      </>
+                    )}
+                    <button className="btn-sm btn-outline" style={{fontSize:'10px', marginTop:'8px', marginLeft:'10px'}} onClick={() => addChapter(pIdx)}>+ Chapitre</button>
+                  </div>
                 </div>
-              </div>
-            ))}
-            <button className="btn-primary" style={{width: '100%'}} onClick={addParty}>+ Nouvelle Partie</button>
-          </div>
+              )) : <div className="info-card">Structure non disponible.</div>}
+            </div>
+          ) : (
+            <div className="outline-scroll" style={{fontFamily:'monospace', fontSize:'11px', whiteSpace:'pre-wrap'}}>
+              <div className="info-card"><strong>PROMPT SYSTEM:</strong><br/>{debug?.planner_prompt?.system}</div>
+              <div className="info-card" style={{background:'#eff6ff'}}><strong>GLM-5 RESPONSE:</strong><br/>{debug?.planner_response_raw}</div>
+              {Array.isArray(debug?.attempts) && debug.attempts.map((a:any, i:number)=>(<div key={i} className="event-bubble"><strong>Attempt {a.attempt}:</strong><pre>{a.raw_output}</pre></div>))}
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -157,200 +211,77 @@ const VisualPlanEditor = ({ runId, onClose, onApproved }: { runId: string, onClo
 const RunDetailPanel = ({ runId, onClose }: { runId: string, onClose: () => void }) => {
   const [run, setRun] = useState<RunStatus | null>(null);
   const [planner, setPlanner] = useState<any>(null);
-  const [corpus, setCorpus] = useState<any>(null);
-  const [sections, setSections] = useState<any[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [load, setLoad] = useState(true);
 
-  useEffect(() => {
-    const fetch = async () => {
-      try {
-        const [sRes, pRes, cRes, secRes] = await Promise.all([
-          axios.get(`/v1/dossier/runs?limit=100`),
-          axios.get(`/v1/dossier/runs/${runId}/planner`).catch(() => ({ data: null })),
-          axios.get(`/v1/dossier/runs/${runId}/corpus`).catch(() => ({ data: { sources: [] } })),
-          axios.get(`/v1/dossier/runs/${runId}/sections`).catch(() => ({ data: { sections: [] } }))
-        ]);
-        setRun(sRes.data.data.find((r: any) => r.run_id === runId));
-        setPlanner(pRes.data);
-        setCorpus(cRes.data);
-        setSections(secRes.data.sections || []);
-      } catch (e) { console.error(e); }
-      setLoading(false);
-    };
+  const fetch = () => {
+    axios.get(`/v1/dossier/runs?limit=100`).then(r => {
+      const found = r.data.data.find((x: any) => x.run_id === runId);
+      setRun(found);
+      if (found) axios.get(`/v1/dossier/runs/${runId}/planner`).then(p => setPlanner(p.data)).catch(() => {});
+      setLoad(false);
+    }).catch(() => setLoad(false));
+  };
+
+  useEffect(() => { fetch(); }, [runId]);
+
+  const updateChapter = (pIdx: number, val: string, cIdx?: number) => {
+    const next = { ...planner };
+    if (cIdx !== undefined) next.master_outline[pIdx].chapters[cIdx].chapter_title = val;
+    else next.master_outline[pIdx].chapter_title = val;
+    setPlanner(next);
+  };
+
+  const updateParty = (pIdx: number, val: string) => {
+    const next = { ...planner };
+    next.master_outline[pIdx].party_title = val;
+    setPlanner(next);
+  };
+
+  const save = async () => { 
+    if (!planner) return; 
+    await axios.post(`/v1/dossier/runs/${runId}/planner`, planner); 
+    alert('Plan sauvé'); 
     fetch();
-  }, [runId]);
+  };
 
-  if (loading) return <div className="detail-overlay"><div className="detail-panel"><div className="panel-body">Chargement...</div></div></div>;
+  if (load) return <div className="detail-overlay">Chargement...</div>;
   if (!run) return null;
 
   return (
     <div className="detail-overlay" onClick={onClose}>
       <div className="detail-panel" onClick={e => e.stopPropagation()}>
         <div className="panel-header">
-          <div>
-            <span className="run-id-tag">{run.run_id}</span>
-            <h2 style={{margin: '4px 0 0 0'}}>{run.question.substring(0, 60)}...</h2>
+          <div style={{flex: 1}}><span className="run-id-tag">{run.run_id}</span><h2 style={{margin: '0', fontSize: '18px'}}>{run.question}</h2></div>
+          <div style={{display:'flex', gap:'10px'}}>
+            <button onClick={save} className="btn-sm btn-outline">Sauver</button>
+            <button className="btn-sm" onClick={onClose}>Fermer</button>
           </div>
-          <button className="btn-sm" onClick={onClose}>Fermer</button>
         </div>
         <div className="panel-body">
-          <div className="stats-grid">
-            <div className="mini-stat"><label>Sources</label><span>{run.sources_count || 0}</span></div>
-            <div className="mini-stat"><label>Claims</label><span>{run.claims_count || 0}</span></div>
+          <div className="info-card" style={{display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '15px'}}>
+            <div className="mini-stat"><label>Langue</label><span>{run.language?.toUpperCase()}</span></div>
+            <div className="mini-stat"><label>Détail</label><span>{run.detail_level}</span></div>
+            <div className="mini-stat"><label>Modèle</label><span style={{fontSize: '10px'}}>{run.planner_model}</span></div>
           </div>
-
           <div className="info-card">
-            <h3>🗺️ Structure du Dossier</h3>
+            <h3>🗺️ Structure (Éditable)</h3>
             <div className="outline-scroll">
-              {planner?.master_outline?.map((p: any, i: number) => (
-                <div key={i} className="p-item">
-                  <strong>{p.party_title}</strong>
-                  <div className="c-list">
-                    {p.chapters?.map((c: any, j: number) => (
-                      <div key={j} className="c-item">
-                        <span>{c.chapter_title}</span>
-                        <div className="s-list">
-                          {c.sub_sections?.map((s: any, k: number) => {
-                            const done = sections.some(sec => sec.title === s.title || sec.s_title === s.title);
-                            return <div key={k} className={`s-item ${done ? 'done' : ''}`}>{done ? '✅' : '⏳'} {s.title}</div>;
-                          })}
-                        </div>
+              {Array.isArray(planner?.master_outline) && planner.master_outline.map((item: any, i: number) => (
+                <div key={i} className="p-item" style={{background:'#f8fafc', padding:'10px', borderRadius:'8px', marginBottom:'10px'}}>
+                  <input className="btn-sm" style={{fontWeight:'bold', width:'100%', marginBottom:'5px'}} value={item.party_title || item.chapter_title} onChange={e => item.party_title ? updateParty(i, e.target.value) : updateChapter(i, e.target.value)} />
+                  <div style={{paddingLeft:'15px', borderLeft:'1px solid #ddd'}}>
+                    {item.chapters ? item.chapters.map((c:any, ci:number)=>(
+                      <div key={ci} style={{marginBottom:'5px'}}>
+                        <input className="btn-sm" style={{fontWeight:'600', width:'100%'}} value={c.chapter_title} onChange={e=>updateChapter(i, e.target.value, ci)} />
                       </div>
+                    )) : item.sub_sections?.map((s: any, k: number) => (
+                      <div key={k} style={{fontSize:'12px', margin:'2px 0'}}>• {s.title}</div>
                     ))}
                   </div>
                 </div>
               ))}
             </div>
           </div>
-
-          <div className="info-card">
-            <h3>🌐 Corpus Web</h3>
-            <div className="sources-grid">
-              {corpus?.sources?.map((s: any, i: number) => (
-                <a key={i} href={s.url} target="_blank" rel="noreferrer" className="source-tag">🔗 {s.title || s.url}</a>
-              ))}
-            </div>
-          </div>
-
-          <div className="info-card">
-            <h3>📜 Journal d'exécution</h3>
-            <div className="event-list">
-              {run.events?.slice().reverse().map((e, i) => (
-                <div key={i} className="event-bubble">
-                  <div className="event-time">{new Date(e.timestamp * 1000).toLocaleTimeString()}</div>
-                  <div className="event-msg">{e.message}</div>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-};
-
-// --- Types ---
-const OPEN_SOURCE_MODELS = [
-  "llama3.2:1b", "llama3.2:3b", "llama3.1:8b", "llama3.1:70b", "llama3.3:70b",
-  "qwen2.5:0.5b", "qwen2.5:1.5b", "qwen2.5:7b", "qwen2.5:14b", "qwen2.5:32b", "qwen2.5:72b",
-  "mistral:7b", "mistral-nemo", "mistral-small:24b", "mixtral:8x7b", "mixtral:8x22b",
-  "gemma2:2b", "gemma2:9b", "gemma2:27b", "phi3.5", "deepseek-v2:236b", "command-r", "command-r-plus",
-  "solar", "yi:9b", "yi:34b", "codellama:34b", "deepseek-coder:33b", "reflection:70b"
-];
-
-// ... (Icon components)
-
-const ModelManager = () => {
-  const [servers, setServers] = useState<any[]>([]);
-  const [selectedServerIdx, setSelectedServerIdx] = useState(0);
-  const [installedModels, setInstalledModels] = useState<any[]>([]);
-  const [newServerName, setNewServerName] = useState('');
-  const [newServerUrl, setNewServerUrl] = useState('');
-
-  const fetchServers = async () => {
-    const res = await axios.get('/v1/servers');
-    setServers(res.data);
-  };
-
-  const fetchModels = async () => {
-    if (!servers[selectedServerIdx]) return;
-    const res = await axios.get(`/ollama/models?url=${servers[selectedServerIdx].url}`);
-    setInstalledModels(res.data.models || []);
-  };
-
-  useEffect(() => { fetchServers(); }, []);
-  useEffect(() => { fetchModels(); }, [servers, selectedServerIdx]);
-
-  const handleAddServer = async () => {
-    await axios.post('/v1/servers', { name: newServerName, url: newServerUrl });
-    setNewServerName(''); setNewServerUrl('');
-    fetchServers();
-  };
-
-  const handlePull = async (name: string) => {
-    await axios.post('/ollama/pull', { name, url: servers[selectedServerIdx].url });
-    alert(`Pull lancé pour ${name} sur ${servers[selectedServerIdx].name}`);
-  };
-
-  return (
-    <div style={{display: 'grid', gridTemplateColumns: '300px 1fr', gap: '24px'}}>
-      <div className="create-card">
-        <h3>🖥️ Serveurs Ollama</h3>
-        <div style={{display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '16px'}}>
-          {servers.map((s, i) => (
-            <button key={i} className={`nav-item ${selectedServerIdx === i ? 'active' : ''}`} onClick={() => setSelectedServerIdx(i)} style={{color: selectedServerIdx === i ? '#fff' : '#000'}}>
-              <div style={{display: 'flex', flexDirection: 'column', textAlign: 'left'}}>
-                <strong>{s.name}</strong>
-                <span style={{fontSize: '10px', opacity: 0.7}}>{s.url}</span>
-              </div>
-            </button>
-          ))}
-        </div>
-        <div style={{marginTop: '20px', borderTop: '1px solid #eee', paddingTop: '20px'}}>
-          <input className="btn-sm" style={{width: '100%', marginBottom: '8px'}} placeholder="Nom" value={newServerName} onChange={e => setNewServerName(e.target.value)} />
-          <input className="btn-sm" style={{width: '100%', marginBottom: '8px'}} placeholder="URL (http://...)" value={newServerUrl} onChange={e => setNewServerUrl(e.target.value)} />
-          <button className="btn-primary" style={{width: '100%'}} onClick={handleAddServer}>Ajouter</button>
-        </div>
-      </div>
-
-      <div className="create-card">
-        <h3>🤖 Bibliothèque de Modèles</h3>
-        <div style={{maxHeight: '600px', overflowY: 'auto', marginTop: '16px'}}>
-          <table style={{width: '100%', borderCollapse: 'collapse'}}>
-            <thead>
-              <tr style={{textAlign: 'left', borderBottom: '2px solid #eee'}}>
-                <th style={{padding: '10px'}}>Modèle</th>
-                <th style={{padding: '10px'}}>Statut</th>
-                <th style={{padding: '10px'}}>Action</th>
-              </tr>
-            </thead>
-            <tbody>
-              {/* First, show all models that are actually installed */}
-              {installedModels.map(im => (
-                <tr key={im.name} style={{borderBottom: '1px solid #eee', background: '#f0fdf4'}}>
-                  <td style={{padding: '10px', fontWeight: '600'}}>{im.name}</td>
-                  <td style={{padding: '10px'}}>
-                    <span className="badge completed">Installé ({(im.size / 1e9).toFixed(1)} GB)</span>
-                  </td>
-                  <td style={{padding: '10px'}}>
-                    <span style={{fontSize: '18px'}}>✅</span>
-                  </td>
-                </tr>
-              ))}
-              {/* Then, show other popular open source models not yet installed */}
-              {OPEN_SOURCE_MODELS.filter(m => !installedModels.some(im => im.name.startsWith(m.split(':')[0]))).map(m => (
-                <tr key={m} style={{borderBottom: '1px solid #eee'}}>
-                  <td style={{padding: '10px', fontWeight: '600', color: '#64748b'}}>{m}</td>
-                  <td style={{padding: '10px'}}>
-                    <span className="badge interrupted">Disponible</span>
-                  </td>
-                  <td style={{padding: '10px'}}>
-                    <button className="btn-sm btn-outline" onClick={() => handlePull(m)}>⬇️ Pull</button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
         </div>
       </div>
     </div>
@@ -358,222 +289,137 @@ const ModelManager = () => {
 };
 
 export default function App() {
+  const [token, setToken] = useState(localStorage.getItem('token'));
   const [view, setView] = useState('dashboard');
-  const [metrics, setMetrics] = useState<Metrics | null>(null);
   const [runs, setRuns] = useState<RunStatus[]>([]);
-  const [servers, setServers] = useState<any[]>([]);
-  const [selectedServerUrl, setSelectedServerUrl] = useState('');
-  const [availableModels, setAvailableModels] = useState<any[]>([]);
-  const [config, setConfig] = useState<any>(null);
-  
-  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
-  const [editingRunId, setEditingRunId] = useState<string | null>(null);
-  
-  const [question, setQuestion] = useState('');
+  const [srv, setSrv] = useState<any[]>([]);
+  const [sIdx, setSIdx] = useState(0);
+  const [models, setModels] = useState<string[]>([]);
+  const [sel, setSel] = useState({ p:'', w:'', j:'', c:'', t:'generic', l:'fr', d:'medium' });
+  const [q, setQ] = useState('');
   const [prompts, setPrompts] = useState<string[]>([]);
-  const [pType, setPType] = useState('generic');
-  const [dLevel, setDLevel] = useState('medium');
+  const [metrics, setMetrics] = useState<Metrics|null>(null);
+  const [detailId, setDetailId] = useState<string|null>(null);
+  const [editId, setEditId] = useState<string|null>(null);
 
-  // Dynamic models for launch
-  const [mPlanner, setMPlanner] = useState('');
-  const [mWriter, setMWriter] = useState('');
-  const [mJudge, setMJudge] = useState('');
+  if (token) axios.defaults.headers.common['Authorization'] = `Bearer ${token}`;
 
   useEffect(() => {
-    axios.get('/config').then(res => {
-      setConfig(res.data);
-      setMPlanner(res.data.planner_model);
-      setMWriter(res.data.writer_model);
-      setMJudge(res.data.judge_model);
-    });
-    axios.get('/v1/dossier/prompts').then(res => setPrompts(res.data.prompts));
-    axios.get('/v1/servers').then(res => {
-      setServers(res.data);
-      if (res.data.length > 0) setSelectedServerUrl(res.data[0].url);
-    });
-
-    const timer = setInterval(() => {
-      axios.get('/system/metrics').then(res => setMetrics(res.data)).catch(() => {});
-      axios.get('/v1/dossier/runs?limit=15').then(res => setRuns(res.data.data || []));
+    if (!token) return;
+    axios.get('/v1/servers').then(r => { setSrv(r.data); const c = r.data.findIndex((x:any)=>x.name.includes('Cloud')); if(c!==-1) setSIdx(c); });
+    axios.get('/v1/dossier/prompts').then(r => setPrompts(r.data.prompts || []));
+    const t = setInterval(() => {
+      axios.get('/system/metrics').then(r => setMetrics(r.data)).catch(()=>{});
+      axios.get('/v1/dossier/runs?limit=20').then(r => setRuns(r.data.data || [])).catch(()=>{});
     }, 2000);
-    return () => clearInterval(timer);
-  }, []);
+    return () => clearInterval(t);
+  }, [token]);
 
   useEffect(() => {
-    if (selectedServerUrl) {
-      axios.get(`/ollama/models?url=${selectedServerUrl}`).then(res => setAvailableModels(res.data.models || []));
+    if (srv[sIdx]) {
+      axios.get(`/ollama/models?url=${srv[sIdx].url}`).then(r => {
+        const list = (r.data.models || []).map((m: any) => m.name);
+        setModels(list);
+        // Do not force select if already set, but ensure we have at least one
+        if (list.length > 0 && !sel.p) {
+          setSel(prev => ({ ...prev, p: list[0], w: list[0], j: list[0], c: list[0] }));
+        }
+      });
     }
-  }, [selectedServerUrl]);
+  }, [srv, sIdx]);
+
+  if (!token) return <Login onLogin={() => setToken(localStorage.getItem('token'))} />;
 
   const calculateProgress = (run: RunStatus) => {
     if (run.state === 'completed') return 100;
-    if (run.state === 'failed') return 100;
     const stages = ['init', 'presearch', 'planner', 'awaiting_validation', 'search', 'corpus', 'shortlist', 'claims', 'verdicts', 'sections', 'completed'];
-    let idx = stages.indexOf(run.stage);
-    if (idx === -1) idx = 0;
-    let subPercent = 0;
-    if (run.events?.length) {
-      const lastMsg = run.events[run.events.length - 1].message;
-      const match = lastMsg.match(/(\d+)\s*\/\s*(\d+)/);
-      if (match) subPercent = parseInt(match[1]) / parseInt(match[2]);
-      else if (run.stage === 'search' || run.stage === 'corpus') subPercent = Math.min(0.8, (run.sources_count || 0) / 100);
-    }
-    const base = (idx / (stages.length - 1)) * 100;
-    const weight = 100 / (stages.length - 1);
-    return Math.round(Math.max(5, base + (subPercent * weight)));
-  };
-
-  const handleStart = async () => {
-    await axios.post('/v1/dossier/runs', {
-      question, 
-      prompt_type: pType, 
-      detail_level: dLevel,
-      ollama_url: selectedServerUrl,
-      planner_model: mPlanner,
-      writer_model: mWriter,
-      judge_model: mJudge
-    });
-    setQuestion('');
+    return Math.round((Math.max(0, stages.indexOf(run.stage)) / (stages.length - 1)) * 100) || 5;
   };
 
   return (
     <div className="app-layout">
       <aside className="sidebar">
-        <div className="brand-area">
-          <h1>📚 BookWriter <span style={{fontSize: '10px', opacity: 0.5}}>v2.1</span></h1>
-        </div>
+        <h1>📚 AIDocGen</h1>
         <nav className="nav-links">
-          <button className={`nav-item ${view === 'dashboard' ? 'active' : ''}`} onClick={() => setView('dashboard')}><Icon name="dashboard"/> Dashboard</button>
-          <button className={`nav-item ${view === 'models' ? 'active' : ''}`} onClick={() => setView('models')}><Icon name="models"/> Modèles & Serveurs</button>
-          <button className={`nav-item ${view === 'config' ? 'active' : ''}`} onClick={() => setView('config')}><Icon name="config"/> Configuration</button>
+          <button className={`nav-item ${view==='dashboard'?'active':''}`} onClick={()=>setView('dashboard')}><Icon name="dashboard"/> Dashboard</button>
+          <button className={`nav-item ${view==='models'?'active':''}`} onClick={()=>setView('models')}><Icon name="models"/> Serveurs</button>
         </nav>
-        {config && (
-          <div style={{marginTop: 'auto', padding: '15px', background: 'rgba(0,0,0,0.2)', borderRadius: '8px', fontSize: '11px', color: '#94a3b8'}}>
-            <div>Moteur: <strong>{config.search_engine}</strong></div>
-          </div>
-        )}
+        <button className="nav-item" style={{marginTop:'auto', opacity:0.5}} onClick={()=>{localStorage.clear();window.location.reload();}}>Logout</button>
       </aside>
-
       <main className="main-content">
         <header className="header-top">
-          <div className="page-title">
-            <h2>{view === 'dashboard' ? 'Tableau de Bord' : view === 'models' ? 'Gestion des Ressources' : 'Paramètres'}</h2>
-            <p>{view === 'dashboard' ? 'Gérez vos recherches approfondies.' : 'Configurez vos serveurs Ollama distants.'}</p>
-          </div>
-          {view === 'dashboard' && metrics && (
-            <div className="metrics-row-horizontal">
-              <div className="mini-metric"><label>CPU {metrics.cpu_percent}%</label><div className="metric-progress small"><div className="metric-fill" style={{width: `${metrics.cpu_percent}%`}}></div></div></div>
-              {metrics.gpus.map((g, i) => (
-                <div key={i} className="mini-metric"><label>GPU {i} {g.util}%</label><div className="metric-progress small"><div className="metric-fill" style={{width: `${g.util}%`, background: '#a855f7'}}></div></div></div>
-              ))}
-            </div>
-          )}
+          <h2>{view.toUpperCase()}</h2>
+          {metrics && <div className="metrics-row-horizontal">
+            <div className="mini-metric"><label>CPU {metrics.cpu_percent}%</label><div className="metric-progress small"><div className="metric-fill" style={{width:`${metrics.cpu_percent}%`}}/></div></div>
+            {metrics.gpus?.map((g:any, i:number) => (
+              <div key={i} className="mini-metric"><label>GPU {i} {g.util}%</label><div className="metric-progress small"><div className="metric-fill" style={{width:`${g.util}%`, background:'#a855f7'}}/></div></div>
+            ))}
+          </div>}
         </header>
-
-        {view === 'dashboard' && (
+        {view === 'dashboard' ? (
           <>
             <section className="create-card">
-              <h3>🚀 Paramètres du Dossier</h3>
-              <textarea 
-                placeholder="Quel sujet souhaitez-vous explorer ?" 
-                value={question} 
-                onChange={e => setQuestion(e.target.value)}
-                rows={2}
-                style={{width: '100%', marginBottom: '16px'}}
-              />
-              <div style={{display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '12px'}}>
-                <div className="input-field">
-                  <label>Serveur Cible</label>
-                  <select className="btn-sm" style={{width: '100%'}} value={selectedServerUrl} onChange={e => setSelectedServerUrl(e.target.value)}>
-                    {servers.map(s => <option key={s.url} value={s.url}>{s.name}</option>)}
-                  </select>
-                </div>
-                <div className="input-field">
-                  <label>Modèle Planner</label>
-                  <select className="btn-sm" style={{width: '100%'}} value={mPlanner} onChange={e => setMPlanner(e.target.value)}>
-                    {availableModels.map(m => <option key={m.name} value={m.name}>{m.name}</option>)}
-                  </select>
-                </div>
-                <div className="input-field">
-                  <label>Modèle Writer</label>
-                  <select className="btn-sm" style={{width: '100%'}} value={mWriter} onChange={e => setMWriter(e.target.value)}>
-                    {availableModels.map(m => <option key={m.name} value={m.name}>{m.name}</option>)}
-                  </select>
-                </div>
-                <div className="input-field">
-                  <label>Modèle Judge</label>
-                  <select className="btn-sm" style={{width: '100%'}} value={mJudge} onChange={e => setMJudge(e.target.value)}>
-                    {availableModels.map(m => <option key={m.name} value={m.name}>{m.name}</option>)}
-                  </select>
-                </div>
+              <textarea placeholder="Sujet..." value={q} onChange={e=>setQ(e.target.value)} rows={2} style={{width:'100%', marginBottom:'10px'}} />
+              <div style={{display:'grid', gridTemplateColumns:'repeat(5, 1fr)', gap:'10px'}}>
+                <div className="input-field"><label>Serveur</label><select className="btn-sm" value={sIdx} onChange={e=>setSIdx(parseInt(e.target.value))}>{srv.map((s,i)=><option key={i} value={i}>{s.name}</option>)}</select></div>
+                <div className="input-field"><label>Planner</label><select className="btn-sm" value={sel.p} onChange={e=>setSel({...sel,p:e.target.value})}>{models.map(m=><option key={m} value={m}>{m}</option>)}</select></div>
+                <div className="input-field"><label>Writer</label><select className="btn-sm" value={sel.w} onChange={e=>setSel({...sel,w:e.target.value})}>{models.map(m=><option key={m} value={m}>{m}</option>)}</select></div>
+                <div className="input-field"><label>Judge</label><select className="btn-sm" value={sel.j} onChange={e=>setSel({...sel,j:e.target.value})}>{models.map(m=><option key={m} value={m}>{m}</option>)}</select></div>
+                <div className="input-field"><label>Coder</label><select className="btn-sm" value={sel.c} onChange={e=>setSel({...sel,c:e.target.value})}>{models.map(m=><option key={m} value={m}>{m}</option>)}</select></div>
               </div>
-              <div style={{display: 'flex', gap: '12px', marginTop: '16px'}}>
-                <select className="btn-sm" value={pType} onChange={e => setPType(e.target.value)}>{prompts.map(p => <option key={p} value={p}>{p.toUpperCase()}</option>)}</select>
-                <select className="btn-sm" value={dLevel} onChange={e => setDLevel(e.target.value)}>
-                  <option value="synthetic">Synthèse</option><option value="medium">Standard</option><option value="dissertation">Dissertation</option>
-                </select>
-                <button className="btn-primary" style={{marginLeft: 'auto'}} onClick={handleStart}>Générer le Dossier</button>
+              <div style={{display:'flex', gap:'10px', marginTop:'10px'}}>
+                <select className="btn-sm" value={sel.l} onChange={e=>setSel({...sel,l:e.target.value})}><option value="fr">FR 🇫🇷</option><option value="en">EN 🇬🇧</option></select>
+                <select className="btn-sm" value={sel.t} onChange={e=>setSel({...sel,t:e.target.value})}>{prompts.map(p=><option key={p} value={p}>{p.toUpperCase()}</option>)}</select>
+                <select className="btn-sm" value={sel.d} onChange={e=>setSel({...sel,d:e.target.value})}><option value="synthetic">Synthèse</option><option value="medium">Standard</option><option value="dissertation">Dissertation</option></select>
+                <button className="btn-primary" style={{marginLeft:'auto'}} onClick={() => axios.post('/v1/dossier/runs', { 
+                  question:q, 
+                  prompt_type:sel.t, 
+                  detail_level:sel.d, 
+                  language:sel.l, 
+                  ollama_url: (srv[sIdx] && srv[sIdx].url) ? srv[sIdx].url : 'https://ollama.com', 
+                  planner_model:sel.p, 
+                  writer_model:sel.w, 
+                  judge_model:sel.j, 
+                  coder_model:sel.c 
+                }).then(() => {setQ(''); axios.get('/v1/dossier/runs?limit=20').then(r => setRuns(r.data.data || []));})}>Générer</button>
               </div>
             </section>
-
-            <div className="section-header">Travaux en cours</div>
             <div className="run-grid">
-              {runs.map(run => (
-                <div key={run.run_id} className="run-row" onClick={() => setSelectedRunId(run.run_id)}>
-                  <div className="run-info-cell">
-                    <h4>{run.question.substring(0, 80)}...</h4>
-                    <span className="run-id-tag">{run.run_id} • {run.planner_model}</span>
-                  </div>
-                  <div className="status-cell">
-                    <span className={`badge ${run.state}`}>{run.state}</span>
-                    <div style={{fontSize: '10px', color: '#94a3b8', marginTop: '4px'}}>{run.stage}</div>
-                  </div>
-                  <div className="progress-cell">
-                    <div className="prog-text"><span>{calculateProgress(run)}%</span></div>
-                    <div className="metric-progress"><div className={`metric-fill ${run.state}`} style={{width: `${calculateProgress(run)}%`}}></div></div>
-                    <div className="action-bar" onClick={e => e.stopPropagation()}>
-                      {run.state === 'running' && (
-                        <button className="btn-sm btn-danger" onClick={() => axios.post(`/v1/dossier/runs/${run.run_id}/cancel`)}>⏹ Stop</button>
-                      )}
-                      {(run.state === 'interrupted' || run.state === 'failed') && (
-                        <button className="btn-sm btn-outline" style={{color: '#2563eb'}} onClick={() => axios.post(`/v1/dossier/runs/${run.run_id}/resume`)}>▶ Reprendre</button>
-                      )}
-                      {run.stage === 'awaiting_validation' && <button className="btn-sm btn-primary" onClick={() => setEditingRunId(run.run_id)}>📝 Éditer</button>}
-                      {run.state === 'completed' && (
-                        <>
-                          <a href={`/v1/dossier/runs/${run.run_id}/report/download`} className="btn-sm btn-outline">MD</a>
-                          <a href={`/v1/dossier/runs/${run.run_id}/report/latex`} className="btn-sm btn-outline">TeX</a>
-                          <a href={`/v1/dossier/runs/${run.run_id}/report/pdf`} className="btn-sm btn-outline" style={{background: '#ef4444', color: '#fff', borderColor: '#ef4444'}}>PDF</a>
-                        </>
-                      )}
-                      <button className="btn-sm btn-danger" onClick={() => axios.delete(`/v1/dossier/runs/${run.run_id}`)}>🗑️</button>
+              {runs.map(run => {
+                const lastMsg = run.events?.length > 0 ? run.events[run.events.length-1].message : run.stage;
+                return (
+                  <div key={run.run_id} className="run-row" onClick={()=>setDetailId(run.run_id)}>
+                    <div className="run-info-cell"><h4>{run.question}</h4><span className="run-id-tag">{run.run_id}</span></div>
+                    <div className="status-cell">
+                      <span className={`badge ${run.state}`}>{run.state}</span>
+                      <div style={{fontSize:'10px', opacity:0.6, marginTop:'4px'}}>{lastMsg}</div>
+                    </div>
+                    <div className="progress-cell">
+                      <div className="metric-progress"><div className={`metric-fill ${run.state}`} style={{width:`${calculateProgress(run)}%`}}/></div>
+                                            <div className="action-bar" onClick={e => e.stopPropagation()}>
+                                              {(run.state !== 'running' || run.stage === 'awaiting_validation') && <button className="btn-sm" title="Relancer" onClick={()=>axios.post(`/v1/dossier/runs/${run.run_id}/reset`)}>🔄</button>}
+                                              {(run.state === 'interrupted' || run.state === 'failed') && <button className="btn-sm btn-outline" title="Reprendre" onClick={()=>axios.post(`/v1/dossier/runs/${run.run_id}/resume`)}>▶️</button>}
+                      
+                        {run.state === 'running' && <button className="btn-sm btn-danger" onClick={()=>axios.post(`/v1/dossier/runs/${run.run_id}/cancel`)}>Stop</button>}
+                        {run.stage === 'awaiting_validation' && <button className="btn-sm btn-primary" onClick={()=>setEditId(run.run_id)}>Plan</button>}
+                        {run.state === 'completed' && (
+                          <>
+                            <button className="btn-sm btn-outline" onClick={()=>axios.get(`/v1/dossier/runs/${run.run_id}/report/download`, {responseType:'blob'}).then(r=>{const b=window.URL.createObjectURL(new Blob([r.data]));const a=document.createElement('a');a.href=b;a.download=`report_${run.run_id}.md`;a.click();})}>MD</button>
+                            <button className="btn-sm btn-outline" onClick={()=>axios.get(`/v1/dossier/runs/${run.run_id}/report/pdf`, {responseType:'blob'}).then(r=>{const b=window.URL.createObjectURL(new Blob([r.data]));const a=document.createElement('a');a.href=b;a.download=`report_${run.run_id}.pdf`;a.click();})}>PDF</button>
+                          </>
+                        )}
+                        <button className="btn-sm btn-danger" onClick={()=>axios.delete(`/v1/dossier/runs/${run.run_id}`)}>🗑️</button>
+                      </div>
                     </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </>
-        )}
-
-        {view === 'models' && <ModelManager />}
-
-        {view === 'config' && (
-          <div className="create-card">
-            <h3>⚙️ Configuration Par Défaut</h3>
-            <p className="text-muted" style={{fontSize: '12px'}}>Ces valeurs sont utilisées quand aucune spécification n'est faite au lancement.</p>
-            <table style={{width: '100%', borderCollapse: 'collapse', marginTop: '20px'}}>
-              <tbody>
-                <tr style={{borderBottom: '1px solid #eee'}}><td style={{padding: '12px 0'}}><strong>Planner</strong></td><td>{config?.planner_model}</td></tr>
-                <tr style={{borderBottom: '1px solid #eee'}}><td style={{padding: '12px 0'}}><strong>Writer</strong></td><td>{config?.writer_model}</td></tr>
-                <tr style={{borderBottom: '1px solid #eee'}}><td style={{padding: '12px 0'}}><strong>Judge</strong></td><td>{config?.judge_model}</td></tr>
-              </tbody>
-            </table>
-          </div>
-        )}
+        ) : <ModelManager />}
       </main>
-
-      {selectedRunId && <RunDetailPanel runId={selectedRunId} onClose={() => setSelectedRunId(null)} />}
-      {editingRunId && <VisualPlanEditor runId={editingRunId} onClose={() => setEditingRunId(null)} onApproved={() => setEditingRunId(null)} />}
+      {detailId && <RunDetailPanel runId={detailId} onClose={()=>setDetailId(null)} />}
+      {editId && <VisualPlanEditor runId={editId} onClose={()=>setEditId(null)} onApproved={()=>setEditId(null)} />}
     </div>
   );
 }
