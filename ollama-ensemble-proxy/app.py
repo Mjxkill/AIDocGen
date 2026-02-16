@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import asyncio
 import uuid
@@ -73,12 +74,23 @@ def _get_gpu_usage():
         return gpus
     except: return []
 
+def parse_tags(tags_str: str) -> list[str]:
+    """Parse tags string into list. Accepts comma-separated or space-separated."""
+    if not tags_str:
+        return []
+    # Split by comma or space
+    tags = re.split(r'[,\s]+', tags_str.strip())
+    # Clean and filter
+    tags = [t.strip().lstrip('#').upper() for t in tags if t.strip()]
+    return tags
+
 class RunRequest(BaseModel):
     model_config = ConfigDict(extra='allow')
     question: str
     prompt_type: Optional[str] = "generic"
     detail_level: Optional[str] = "medium"
     language: Optional[str] = "fr"
+    tags: Optional[str] = None  # Comma or space separated tags, e.g. "IMX8MP, DSP, HiFi4"
     ollama_url: Optional[str] = None
     planner_model: Optional[str] = None
     writer_model: Optional[str] = None
@@ -121,20 +133,26 @@ async def list_runs(limit: int = 20, user: dict = Depends(get_current_user)):
 
 @app.post("/v1/dossier/runs")
 async def start_run(req: RunRequest, user: dict = Depends(get_current_user)):
+    import re
     run_id = f"run-{int(time.time())}-{uuid.uuid4().hex[:10]}"
     engine = _get_engine(req.ollama_url, req.dict())
     run_dir = DATA_DIR / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Parse tags
+    tags = parse_tags(req.tags) if req.tags else []
+    
     status_data = {
         "run_id": run_id, "question": req.question, "state": "running", "stage": "init",
         "prompt_type": req.prompt_type, "detail_level": req.detail_level, "language": req.language,
+        "tags": tags,  # Store tags in status
         "ollama_url": req.ollama_url, "planner_model": req.planner_model, "writer_model": req.writer_model,
         "coder_model": req.coder_model, "owner_id": user["id"], "owner_name": user["username"],
         "events": [{"timestamp": int(time.time()), "stage": "init", "message": "Démarrage..."}], 
         "updated_at": int(time.time())
     }
     (run_dir / "status.json").write_text(json.dumps(status_data))
-    _DOSSIER_TASKS[run_id] = asyncio.create_task(engine.run(run_id, req.question, req.prompt_type, req.detail_level, language=req.language, coder_model=req.coder_model))
+    _DOSSIER_TASKS[run_id] = asyncio.create_task(engine.run(run_id, req.question, req.prompt_type, req.detail_level, language=req.language, coder_model=req.coder_model, tags=tags))
     return {"run_id": run_id}
 
 @app.get("/v1/dossier/runs/{run_id}/planner")
@@ -165,7 +183,8 @@ async def reset_run(run_id: str, user: dict = Depends(get_current_user)):
     d.update({"state": "running", "stage": "init", "events": [], "error": None})
     (run_dir / "status.json").write_text(json.dumps(d))
     engine = _get_engine(d.get("ollama_url"), d)
-    _DOSSIER_TASKS[run_id] = asyncio.create_task(engine.run(run_id, d["question"], resume=False, language=d.get("language", "fr")))
+    tags = d.get("tags", [])
+    _DOSSIER_TASKS[run_id] = asyncio.create_task(engine.run(run_id, d["question"], resume=False, language=d.get("language", "fr"), tags=tags))
     return {"status": "ok"}
 
 @app.post("/v1/dossier/runs/{run_id}/cancel")
@@ -185,11 +204,11 @@ async def resume_run(run_id: str, user: dict = Depends(get_current_user)):
     if not run_dir.exists(): raise HTTPException(404)
     status_path = run_dir / "status.json"
     d = json.loads(status_path.read_text())
-    # Clear error before resuming
     d.update({"state": "running", "error": None})
     status_path.write_text(json.dumps(d))
     engine = _get_engine(d.get("ollama_url"), d)
-    _DOSSIER_TASKS[run_id] = asyncio.create_task(engine.run(run_id, d["question"], resume=True, language=d.get("language", "fr")))
+    tags = d.get("tags", [])
+    _DOSSIER_TASKS[run_id] = asyncio.create_task(engine.run(run_id, d["question"], resume=True, language=d.get("language", "fr"), tags=tags))
     return {"status": "ok"}
 
 @app.post("/v1/dossier/runs/{run_id}/approve")
@@ -198,7 +217,8 @@ async def approve_run(run_id: str, user: dict = Depends(get_current_user)):
     (run_dir / "validated.txt").write_text("ok")
     d = json.loads((run_dir / "status.json").read_text())
     engine = _get_engine(d.get("ollama_url"))
-    _DOSSIER_TASKS[run_id] = asyncio.create_task(engine.run(run_id, d["question"], resume=True, language=d.get("language", "fr")))
+    tags = d.get("tags", [])
+    _DOSSIER_TASKS[run_id] = asyncio.create_task(engine.run(run_id, d["question"], resume=True, language=d.get("language", "fr"), tags=tags))
     return {"status": "ok"}
 
 @app.get("/v1/dossier/runs/{run_id}/report/pdf")

@@ -14,18 +14,53 @@ class WebResearcher:
     def __init__(self, config: DossierConfig):
         self.config = config
 
-    async def presearch(self, question: str) -> list[dict[str, str]]:
+    def _filter_by_tags(self, text: str, tags: list[str]) -> bool:
+        """Check if text contains at least one of the required tags."""
+        if not tags:
+            return True  # No filter if no tags
+        text_lower = text.lower()
+        for tag in tags:
+            # Check for tag variations (IMX8MP, imx8mp, i.MX8MP, etc.)
+            tag_lower = tag.lower()
+            tag_no_special = re.sub(r'[^a-z0-9]', '', tag_lower)
+            if tag_lower in text_lower or tag_no_special in re.sub(r'[^a-z0-9]', '', text_lower):
+                return True
+        return False
+
+    def _enhance_query_with_tags(self, query: str, tags: list[str]) -> str:
+        """Add tags to search query if not already present."""
+        if not tags:
+            return query
+        query_lower = query.lower()
+        tags_to_add = []
+        for tag in tags[:3]:  # Limit to 3 tags to avoid too long queries
+            tag_lower = tag.lower()
+            if tag_lower not in query_lower:
+                tags_to_add.append(tag)
+        if tags_to_add:
+            return f"{query} {' '.join(tags_to_add)}"
+        return query
+
+    async def presearch(self, question: str, tags: list[str] = None) -> list[dict[str, str]]:
         queries = [question]
-        # Generate variants logic could be moved here if complex
+        # Add tag-enhanced query
+        if tags:
+            queries.append(self._enhance_query_with_tags(question, tags))
+        
         results = []
         try:
             with DDGS() as ddgs:
-                for q in queries:
+                for q in queries[:2]:  # Limit to 2 queries for presearch
                     for res in ddgs.text(q, max_results=5):
+                        # Filter by tags if provided
+                        title = res.get("title", "")
+                        snippet = res.get("body", "")
+                        if tags and not self._filter_by_tags(f"{title} {snippet}", tags):
+                            continue
                         results.append({
-                            "title": res.get("title", ""),
+                            "title": title,
                             "url": res.get("href", ""),
-                            "snippet": res.get("body", ""),
+                            "snippet": snippet,
                         })
         except Exception:
             pass
@@ -36,11 +71,11 @@ class WebResearcher:
         planner: dict[str, Any],
         progress_cb: Callable | None,
         run_dir: Path | None,
+        tags: list[str] = None,
     ) -> dict[str, Any]:
         all_searches = []
         sub_questions = planner.get("sub_questions", [])
         if not sub_questions:
-            # Fallback if no sub_questions, use the reformulated question
             sub_questions = [{"id": "SQ1", "question": planner.get("question_reformulated", "Dossier")}]
 
         total_sq = len(sub_questions)
@@ -48,6 +83,10 @@ class WebResearcher:
         for idx, sq in enumerate(sub_questions, 1):
             sq_id = sq.get("id")
             query = sq.get("question")
+            
+            # Enhance query with tags
+            if tags:
+                query = self._enhance_query_with_tags(query, tags)
             
             if run_dir:
                 await emit_progress(progress_cb, run_dir, "search", f"Searching {idx}/{total_sq}: {query[:50]}...")
@@ -58,10 +97,18 @@ class WebResearcher:
                 await asyncio.sleep(self.config.web_request_delay)
                 with DDGS() as ddgs:
                     for res in ddgs.text(query, max_results=self.config.web_per_query_results):
+                        title = res.get("title", "")
+                        snippet = res.get("body", "")
+                        url = res.get("href", "")
+                        
+                        # Filter by tags if provided
+                        if tags and not self._filter_by_tags(f"{title} {snippet}", tags):
+                            continue
+                        
                         links.append({
-                            "title": res.get("title"),
-                            "url": res.get("href"),
-                            "snippet": res.get("body"),
+                            "title": title,
+                            "url": url,
+                            "snippet": snippet,
                             "engine": "ddg"
                         })
             except Exception as e:
@@ -70,7 +117,7 @@ class WebResearcher:
             # Fallback to SearxNG if DDG failed or returned nothing
             if not links and self.config.searxng_base_url:
                 try:
-                    searx_links = await self._search_searxng(query)
+                    searx_links = await self._search_searxng(query, tags)
                     links.extend(searx_links)
                 except Exception as e:
                     print(f"SearxNG Search error for {sq_id}: {e}")
@@ -78,7 +125,7 @@ class WebResearcher:
             # Final fallback to Wikipedia
             if not links:
                 try:
-                    wiki_links = await self._search_wikipedia(query)
+                    wiki_links = await self._search_wikipedia(query, tags)
                     links.extend(wiki_links)
                 except Exception:
                     pass
@@ -91,7 +138,7 @@ class WebResearcher:
             
         return {"sub_questions": all_searches}
 
-    async def _search_searxng(self, query: str) -> list[dict[str, str]]:
+    async def _search_searxng(self, query: str, tags: list[str] = None) -> list[dict[str, str]]:
         url = f"{self.config.searxng_base_url.rstrip('/')}/search"
         params = {
             "q": query,
@@ -106,18 +153,24 @@ class WebResearcher:
                 if resp.status_code == 200:
                     data = resp.json()
                     for res in data.get("results", [])[:self.config.web_per_query_results]:
+                        title = res.get("title", "")
+                        snippet = res.get("content", "")
+                        
+                        # Filter by tags if provided
+                        if tags and not self._filter_by_tags(f"{title} {snippet}", tags):
+                            continue
+                        
                         links.append({
-                            "title": res.get("title"),
+                            "title": title,
                             "url": res.get("url"),
-                            "snippet": res.get("content"),
+                            "snippet": snippet,
                             "engine": "searxng"
                         })
         except Exception as e:
             print(f"SearxNG API error: {e}")
         return links
 
-    async def _search_wikipedia(self, query: str) -> list[dict[str, str]]:
-        # Search Wikipedia FR
+    async def _search_wikipedia(self, query: str, tags: list[str] = None) -> list[dict[str, str]]:
         api_url = "https://fr.wikipedia.org/w/api.php"
         params = {
             "action": "query",
@@ -133,12 +186,19 @@ class WebResearcher:
                 if resp.status_code == 200:
                     data = resp.json()
                     for res in data.get("query", {}).get("search", []):
-                        page_id = res.get("pageid")
-                        title = res.get("title")
+                        title = res.get("title", "")
+                        snippet = res.get("snippet", "")
+                        
+                        # Filter by tags if provided (less strict for Wikipedia)
+                        # Only filter if we have very specific tags (like product names)
+                        if tags and len(tags) > 0 and len(tags[0]) > 4:  # Specific product tag
+                            if not self._filter_by_tags(f"{title} {snippet}", tags):
+                                continue
+                        
                         links.append({
                             "title": title,
                             "url": f"https://fr.wikipedia.org/wiki/{title.replace(' ', '_')}",
-                            "snippet": res.get("snippet"),
+                            "snippet": snippet,
                             "engine": "wikipedia"
                         })
         except Exception:
@@ -150,6 +210,7 @@ class WebResearcher:
         search_results: dict[str, Any],
         progress_cb: Callable | None,
         run_dir: Path,
+        tags: list[str] = None,
     ) -> dict[str, Any]:
         unique_urls = {}
         for sq in search_results.get("sub_questions", []):
@@ -169,7 +230,7 @@ class WebResearcher:
         async def fetch_one(link: dict[str, str]):
             nonlocal processed
             async with semaphore:
-                source = await self._fetch_url(link["url"], run_dir)
+                source = await self._fetch_url(link["url"], run_dir, tags)
                 processed += 1
                 if processed % 10 == 0 and run_dir:
                     await emit_progress(progress_cb, run_dir, "corpus", f"Processed {processed}/{len(urls_to_fetch)}")
@@ -184,7 +245,7 @@ class WebResearcher:
             "generated_at": int(time.time())
         }
 
-    async def _fetch_url(self, url: str, run_dir: Path) -> dict[str, Any] | None:
+    async def _fetch_url(self, url: str, run_dir: Path, tags: list[str] = None) -> dict[str, Any] | None:
         try:
             from bs4 import BeautifulSoup
             timeout = httpx.Timeout(self.config.web_timeout_seconds)
@@ -209,6 +270,10 @@ class WebResearcher:
                 text = "\n".join(chunk for chunk in chunks if chunk)
                 
                 title = soup.title.string.strip() if soup.title else ""
+                
+                # Filter content by tags if provided
+                if tags and not self._filter_by_tags(f"{title} {text[:5000]}", tags):
+                    return None
                 
                 # Save clean text
                 clean_dir = run_dir / "clean"

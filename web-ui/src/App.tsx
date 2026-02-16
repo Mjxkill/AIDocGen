@@ -297,6 +297,7 @@ export default function App() {
   const [models, setModels] = useState<string[]>([]);
   const [sel, setSel] = useState({ p:'', w:'', j:'', c:'', t:'generic', l:'fr', d:'medium' });
   const [q, setQ] = useState('');
+  const [tags, setTags] = useState('');
   const [prompts, setPrompts] = useState<string[]>([]);
   const [metrics, setMetrics] = useState<Metrics|null>(null);
   const [detailId, setDetailId] = useState<string|null>(null);
@@ -360,6 +361,7 @@ export default function App() {
           <>
             <section className="create-card">
               <textarea placeholder="Sujet..." value={q} onChange={e=>setQ(e.target.value)} rows={2} style={{width:'100%', marginBottom:'10px'}} />
+              <input placeholder="Tags (ex: IMX8MP, DSP, HiFi4) - Optionnel" value={tags} onChange={e=>setTags(e.target.value)} className="btn-sm" style={{width:'100%', marginBottom:'10px'}} />
               <div style={{display:'grid', gridTemplateColumns:'repeat(5, 1fr)', gap:'10px'}}>
                 <div className="input-field"><label>Serveur</label><select className="btn-sm" value={sIdx} onChange={e=>setSIdx(parseInt(e.target.value))}>{srv.map((s,i)=><option key={i} value={i}>{s.name}</option>)}</select></div>
                 <div className="input-field"><label>Planner</label><select className="btn-sm" value={sel.p} onChange={e=>setSel({...sel,p:e.target.value})}>{models.map(m=><option key={m} value={m}>{m}</option>)}</select></div>
@@ -380,8 +382,9 @@ export default function App() {
                   planner_model:sel.p, 
                   writer_model:sel.w, 
                   judge_model:sel.j, 
-                  coder_model:sel.c 
-                }).then(() => {setQ(''); axios.get('/v1/dossier/runs?limit=20').then(r => setRuns(r.data.data || []));})}>Générer</button>
+                  coder_model:sel.c,
+                  tags: tags
+                }).then(() => {setQ(''); setTags(''); axios.get('/v1/dossier/runs?limit=20').then(r => setRuns(r.data.data || []));})}>Générer</button>
               </div>
             </section>
             <div className="run-grid">

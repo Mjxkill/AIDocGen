@@ -17,17 +17,22 @@ class DossierEngine:
         self.analyst = Analyst(config, self.llm)
         self.writer = Writer(config, self.llm)
 
-    async def run(self, run_id: str, question: str, prompt_type: str = "generic", detail_level: str = "medium", resume: bool = False, language: str = "fr", coder_model: str | None = None) -> dict[str, Any]:
+    async def run(self, run_id: str, question: str, prompt_type: str = "generic", detail_level: str = "medium", resume: bool = False, language: str = "fr", coder_model: str | None = None, tags: list[str] = None) -> dict[str, Any]:
         run_dir = Path(self.config.data_dir) / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Store tags for later use
+        if tags is None:
+            tags = []
         
         # Update status to running
         s_path = run_dir / "status.json"
         data = load_json(s_path) or {}
         data["state"] = "running"
-        data["error"] = None # CLEAR OLD ERROR
+        data["error"] = None
         data["updated_at"] = int(time.time())
         data["language"] = language
+        data["tags"] = tags  # Ensure tags are stored
         if coder_model: data["coder_model"] = coder_model
         save_json(s_path, data)
         
@@ -37,23 +42,23 @@ class DossierEngine:
             if logs: llm_logs = logs
 
         try:
-            # 1. PRESEARCH
-            pre = await self._step(run_dir, "presearch", resume, None, lambda: self.researcher.presearch(question))
+            # 1. PRESEARCH (with tags for filtering)
+            pre = await self._step(run_dir, "presearch", resume, None, lambda: self.researcher.presearch(question, tags=tags))
             # 2. PLANNER
-            pla = await self._step(run_dir, "planner", resume, None, lambda: self.writer.plan_dossier(question, detail_level, llm_logs, prompt_type, language, presearch_results=pre, run_dir=run_dir, coder_model_override=coder_model))
+            pla = await self._step(run_dir, "planner", resume, None, lambda: self.writer.plan_dossier(question, detail_level, llm_logs, prompt_type, language, presearch_results=pre, run_dir=run_dir, coder_model_override=coder_model, tags=tags))
             
             # 3. PAUSE
             if not (run_dir / "validated.txt").exists():
                 await emit_progress(None, run_dir, "awaiting_validation", "Plan ready. Awaiting approval.")
                 return {"status": "paused"}
 
-            # 4. SEARCH
+            # 4. SEARCH (with tags for filtering)
             await emit_progress(None, run_dir, "search", "Démarrage de la recherche web...")
-            sea = await self._step(run_dir, "search_results", resume, None, lambda: self.researcher.search_subquestions(pla, None, run_dir))
+            sea = await self._step(run_dir, "search_results", resume, None, lambda: self.researcher.search_subquestions(pla, None, run_dir, tags=tags))
             
             # 5. CORPUS
             await emit_progress(None, run_dir, "corpus", f"Téléchargement de {len(sea.get('sub_questions', []))} sets de résultats...")
-            cor = await self._step(run_dir, "corpus", resume, None, lambda: self.researcher.build_corpus(sea, None, run_dir))
+            cor = await self._step(run_dir, "corpus", resume, None, lambda: self.researcher.build_corpus(sea, None, run_dir, tags=tags))
             
             # Update status with source count
             s_path = run_dir / "status.json"
@@ -79,9 +84,9 @@ class DossierEngine:
             # 8. VERIFICATION
             await emit_progress(None, run_dir, "verdicts", f"Vérification de {len(clm['claims'])} affirmations...")
             ver = await self._step(run_dir, "verdicts", resume, None, lambda: self.analyst.verify_claims(clm["claims"], llm_logs, None, run_dir))
-            # 9. WRITING
+            # 9. WRITING (with tags for focus)
             await emit_progress(None, run_dir, "sections", "Rédaction des chapitres du dossier...")
-            sec = await self._step(run_dir, "sections", resume, None, lambda: self.writer.write_sections(pla, clm["claims"], llm_logs, None, run_dir, language))
+            sec = await self._step(run_dir, "sections", resume, None, lambda: self.writer.write_sections(pla, clm["claims"], llm_logs, None, run_dir, language, tags=tags))
 
             # 10. ASSEMBLY
             report_md, annex_md = await self.writer.assemble_report(pla, sec, clm["claims"], ver, cor)
