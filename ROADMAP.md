@@ -12,7 +12,7 @@ Légende effort : `S` < 4h · `M` 0,5–2 jours · `L` > 2 jours · `XL` > 1 sem
 |---|------|--------|--------|-------|
 | 1 | **Job queue persistante** (Celery / Dramatiq + Redis) — survit aux redémarrages du proxy, scaling horizontal | L | ☐ | Migrer `_DOSSIER_TASKS / _PDF_TASKS / _VIDEO_TASKS / _AUDIO_TASKS / _WEB_TASKS / _AUDIOBOOK_TASKS` de asyncio in-process vers une vraie queue. Modèle Beat pour les schedules. |
 | 2 | **Tests automatisés + CI** (pytest + GitHub Actions) | M | ☐ | Démarrer par : split markdown, _has_prose, parse_tags, ownership filtering. Couverture cible : pipeline critique. |
-| 3 | **Logging structuré** (structlog → JSON → Loki) | S | ☐ | Remplacer les `print()`. Champs: `run_id, user, stage, duration_ms`. |
+| 3 | **Logging structuré** (structlog → JSON → Loki) | S | ☑ | core/logging_config.py: stdlib + JSON formatter. ~12 print() → log.info/warning. LOG_LEVEL env. |
 | 4 | **Healthchecks + métriques Prometheus** (`/health` détaillé + `/metrics`) + dashboard Grafana | M | ☐ | Surveiller: GPU/CPU, queue size, erreurs, durée par stage, coût cumulatif. |
 | 5 | **Backups automatiques** (restic ou rclone vers S3/Backblaze, cron quotidien) | S | ☐ | Cibles: `data/dossiers`, `data/audiobook_jobs`, `data/video_jobs`, `data/audio_jobs`, `data/pdf_jobs`, `data/web_jobs`, `data/users.json`, `data/servers.json`. |
 | 6 | **Quotas par utilisateur** (storage, compute, tokens cloud) | M | ☐ | Limites configurables: GB stockage, runs/jour, tokens DeepSeek/mois, requêtes Firecrawl. |
@@ -23,9 +23,9 @@ Légende effort : `S` < 4h · `M` 0,5–2 jours · `L` > 2 jours · `XL` > 1 sem
 |---|------|--------|--------|-------|
 | 7 | **Secrets manager** (sops + age, ou Docker secrets, ou Vault) | M | ☐ | `OLLAMA_API_KEY`, `DEEPSEEK_API_KEY`, `OPENAI_API_KEY`, `FIRECRAWL_API_KEY`, `JWT_SECRET_KEY`, `DIFY_*`. |
 | 8 | **Forcer changement mdp admin/admin à la 1ère connexion** | S | ☑ | Flag `must_change_password` posé sur défaut admin + reset admin + create user. Modal forcée frontend. |
-| 9 | **Rate limiting** par user (slowapi) | S | ☐ | Endpoints sensibles: `/dossier/runs`, `/web/agent`, `/audiobook/*`, `/auth/login`. |
+| 9 | **Rate limiting** par user (slowapi) | S | ☑ | slowapi 0.1.9, keying par bearer token ou IP, 8 endpoints sensibles avec limites adaptées. 429+Retry-After. |
 | 10 | **2FA TOTP** (au moins admin) | M | ☐ | pyotp + QR code dans le profil. |
-| 11 | **Audit log** (login, run launched, doc deleted, etc.) | S | ☐ | Append-only `data/audit.log`. Vue admin. |
+| 11 | **Audit log** (login, run launched, doc deleted, etc.) | S | ☑ | core/audit.py append-only data/audit.log. Hooks login/password/user CRUD/dossier launch+delete. GET /v1/audit/log admin-only. |
 
 ## 🟢 UX / fonctionnalités utilisateur
 
