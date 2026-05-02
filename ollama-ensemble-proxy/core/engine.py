@@ -8,6 +8,9 @@ from .research import WebResearcher
 from .analysis import Analyst
 from .writer import Writer
 from .utils import save_json, load_json, emit_progress
+from .logging_config import get_logger
+
+log = get_logger("aidocgen.engine")
 
 class DossierEngine:
     def __init__(self, config: DossierConfig):
@@ -122,7 +125,7 @@ class DossierEngine:
                 from export_latex import generate_latex
                 generate_latex(run_id, data_dir=self.config.data_dir)
             except Exception as e:
-                print(f"Latex/PDF export failed: {e}")
+                log.warning("Latex/PDF export failed", extra={"error": str(e)})
             
             # FINALIZE
             await emit_progress(None, run_dir, "completed", "Dossier completed.")

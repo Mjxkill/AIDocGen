@@ -5,6 +5,9 @@ import httpx
 import re
 from typing import Any
 from .config import DossierConfig
+from .logging_config import get_logger
+
+log = get_logger("aidocgen.llm")
 
 class LLMClient:
     def __init__(self, config: DossierConfig):
@@ -50,7 +53,8 @@ class LLMClient:
         last_error = None
         for attempt in range(max_retries):
             try:
-                print(f"DEBUG: LLM Call to {model} (stage: {stage}, attempt: {attempt+1})")
+                log.info("llm call", extra={"model": model, "stage": stage,
+                                            "attempt": attempt + 1, "max": max_retries})
                 start_ts = time.time()
                 async with httpx.AsyncClient(timeout=timeout_val) as client:
                     resp = await client.post(url, json=payload, headers=headers)
@@ -58,8 +62,10 @@ class LLMClient:
                     data = resp.json()
                     content = data.get("message", {}).get("content", "")
                     duration = round(time.time() - start_ts, 2)
-                    print(f"DEBUG: LLM Success in {duration}s")
-                    
+                    log.info("llm ok", extra={"model": model, "stage": stage,
+                                              "duration_s": duration,
+                                              "output_chars": len(content)})
+
                     if llm_logs is not None:
                         llm_logs.append({
                             "timestamp": int(time.time()),
@@ -72,9 +78,11 @@ class LLMClient:
                     return content
             except Exception as e:
                 last_error = e
-                print(f"DEBUG: LLM Attempt {attempt+1} failed: {e}")
+                log.warning("llm attempt failed",
+                            extra={"model": model, "stage": stage,
+                                   "attempt": attempt + 1, "error": str(e)})
                 await asyncio.sleep(2 * (attempt + 1))
-        
+
         raise RuntimeError(f"LLM call failed after {max_retries} attempts: {last_error}")
 
     async def parse_json(

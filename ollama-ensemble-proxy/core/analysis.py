@@ -7,6 +7,9 @@ from pathlib import Path
 from .config import DossierConfig
 from .llm import LLMClient
 from .utils import emit_progress
+from .logging_config import get_logger
+
+log = get_logger("aidocgen.analysis")
 
 def _date_instruction() -> str:
     today = date.today().strftime("%d/%m/%Y")
@@ -115,7 +118,7 @@ class Analyst:
                         # Source not ranked by LLM — assign neutral score
                         ranked_results.append({"source_id": sid, "score": 0.5})
             except Exception as e:
-                print(f"Ranking batch {i} failed: {e}")
+                log.warning("Ranking batch  failed", extra={"i": i, "error": str(e)})
                 # Graceful fallback: assign neutral scores
                 for s in batch:
                     ranked_results.append({"source_id": s["source_id"], "score": 0.5})
@@ -223,7 +226,7 @@ class Analyst:
                     encoding="utf-8"
                 )
         except Exception as e:
-            print(f"Coherence check failed (non-fatal): {e}")
+            log.warning("Coherence check failed (non-fatal)", extra={"error": str(e)})
 
         return {"claims": all_claims, "coherence": coherence_summary}
 

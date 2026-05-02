@@ -12,6 +12,9 @@ from duckduckgo_search import DDGS
 
 from .config import DossierConfig
 from .utils import canonicalize_url, emit_progress
+from .logging_config import get_logger
+
+log = get_logger("aidocgen.research")
 
 class WebResearcher:
     def __init__(self, config: DossierConfig):
@@ -69,7 +72,7 @@ class WebResearcher:
                     data = resp.json()
                     return data.get("links", [])[:limit]
         except Exception as e:
-            print(f"Firecrawl /map error for {url}: {e}")
+            log.warning("Firecrawl /map error for", extra={"url": url, "error": str(e)})
         return []
 
     async def _firecrawl_crawl(self, url: str, max_pages: int = 10) -> list[dict[str, Any]]:
@@ -118,7 +121,7 @@ class WebResearcher:
                     elif status in ("failed", "cancelled"):
                         return []
         except Exception as e:
-            print(f"Firecrawl /crawl error for {url}: {e}")
+            log.warning("Firecrawl /crawl error for", extra={"url": url, "error": str(e)})
         return []
 
     async def _firecrawl_extract(self, url: str, schema: dict[str, Any]) -> dict[str, Any] | None:
@@ -140,7 +143,7 @@ class WebResearcher:
                     if data.get("success"):
                         return data.get("data", {})
         except Exception as e:
-            print(f"Firecrawl /extract error for {url}: {e}")
+            log.warning("Firecrawl /extract error for", extra={"url": url, "error": str(e)})
         return None
 
     # ─────────────────────────────────────────────
@@ -187,7 +190,7 @@ class WebResearcher:
                         continue
                     links.append({"title": title, "url": res.get("href", ""), "snippet": snippet, "engine": "ddg"})
         except Exception as e:
-            print(f"DDG Search error: {e}")
+            log.warning("DDG Search error", extra={"error": str(e)})
         return links
 
     async def _search_searxng(self, query: str, tags: list[str] = None) -> list[dict[str, str]]:
@@ -206,7 +209,7 @@ class WebResearcher:
                             continue
                         links.append({"title": title, "url": res.get("url"), "snippet": snippet, "engine": "searxng"})
         except Exception as e:
-            print(f"SearxNG API error: {e}")
+            log.warning("SearxNG API error", extra={"error": str(e)})
         return links
 
     async def _search_wikipedia(self, query: str, tags: list[str] = None) -> list[dict[str, str]]:
@@ -500,7 +503,7 @@ class WebResearcher:
                 if fc_result:
                     return fc_result
             except Exception as e:
-                print(f"Firecrawl failed for {url}: {e}")
+                log.warning("Firecrawl failed for", extra={"url": url, "error": str(e)})
 
         # Fallback to basic scraping
         return await self._fetch_bs4(url, final_url, sid, run_dir, tags)

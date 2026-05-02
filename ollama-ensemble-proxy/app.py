@@ -26,6 +26,27 @@ from pydantic import BaseModel, ConfigDict
 from core.config import DossierConfig
 from core.engine import DossierEngine
 from core.auth import get_current_user, get_admin_user, create_access_token, verify_password, get_password_hash, _get_users, _save_users, ACCESS_TOKEN_EXPIRE_MINUTES
+from core.logging_config import configure_logging, get_logger
+from core import audit
+
+configure_logging()
+log = get_logger("aidocgen.app")
+
+from slowapi import Limiter
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
+
+
+def _rate_limit_key(request: Request) -> str:
+    """Authenticated users get their own bucket (keyed on bearer token);
+    anonymous traffic falls back to client IP."""
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        return auth[7:][:40]
+    return get_remote_address(request)
+
+
+limiter = Limiter(key_func=_rate_limit_key, default_limits=[])
 
 # --- MIMETYPES SETUP ---
 mimetypes.init()
@@ -34,6 +55,15 @@ mimetypes.add_type('text/css', '.css')
 
 AIDOCGEN_VERSION = "1.0.0"
 app = FastAPI(title="AIDocGen Proxy")
+app.state.limiter = limiter
+
+@app.exception_handler(RateLimitExceeded)
+async def _rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    return JSONResponse(
+        status_code=429,
+        content={"detail": f"rate limit exceeded: {exc.detail}"},
+        headers={"Retry-After": str(getattr(exc, "retry_after", 60))},
+    )
 
 # --- ASSETS PRIORITY (For MIME stability) ---
 app.mount("/ui/assets", StaticFiles(directory="../web-ui/dist/assets"), name="assets")
@@ -193,11 +223,17 @@ class RunRequest(BaseModel):
 
 # --- AUTH API ---
 @app.post("/v1/auth/login")
-async def login(form_data: OAuth2PasswordRequestForm = Depends()):
+@limiter.limit("10/minute")
+async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends()):
     users = _get_users()
     user = next((u for u in users if u["username"] == form_data.username), None)
+    ip = request.client.host if request.client else None
     if not user or not verify_password(form_data.password, user["hashed_password"]):
+        audit.record(BASE_DIR / "data", action="login.fail",
+                     actor_name=form_data.username, ip=ip)
         raise HTTPException(status_code=400, detail="Bad credentials")
+    audit.record(BASE_DIR / "data", action="login.ok",
+                 actor_id=user["id"], actor_name=user["username"], ip=ip)
     return {
         "access_token": create_access_token(data={"sub": user["username"]}),
         "token_type": "bearer",
@@ -234,6 +270,8 @@ async def change_own_password(payload: SelfPasswordChange,
     user["hashed_password"] = get_password_hash(payload.new_password)
     user["must_change_password"] = False
     _save_users(users)
+    audit.record(BASE_DIR / "data", action="password.self_change",
+                 actor_id=current_user["id"], actor_name=current_user["username"])
     return {"status": "ok"}
 
 @app.get("/v1/auth/preferences")
@@ -286,6 +324,9 @@ async def create_user(payload: UserCreate, admin: dict = Depends(get_admin_user)
     }
     users.append(new_user)
     _save_users(users)
+    audit.record(BASE_DIR / "data", action="user.create",
+                 actor_id=admin["id"], actor_name=admin["username"],
+                 target=new_user["username"], role=new_user["role"])
     return {"id": new_user["id"], "username": new_user["username"], "role": new_user["role"]}
 
 @app.post("/v1/users/{username}/password")
@@ -297,6 +338,8 @@ async def change_user_password(username: str, payload: PasswordChange, admin: di
     user["hashed_password"] = get_password_hash(payload.password)
     user["must_change_password"] = True  # force the user to pick their own
     _save_users(users)
+    audit.record(BASE_DIR / "data", action="password.admin_reset",
+                 actor_id=admin["id"], actor_name=admin["username"], target=username)
     return {"status": "ok"}
 
 @app.delete("/v1/users/{username}")
@@ -308,7 +351,15 @@ async def delete_user(username: str, admin: dict = Depends(get_admin_user)):
         raise HTTPException(404, "user not found")
     users = [u for u in users if u["username"] != username]
     _save_users(users)
+    audit.record(BASE_DIR / "data", action="user.delete",
+                 actor_id=admin["id"], actor_name=admin["username"], target=username)
     return {"status": "ok"}
+
+# --- AUDIT LOG (admin only) ---
+@app.get("/v1/audit/log")
+async def audit_log(limit: int = 200, action: str | None = None,
+                    admin: dict = Depends(get_admin_user)):
+    return {"data": audit.tail(BASE_DIR / "data", n=limit, action_filter=action)}
 
 # --- DOSSIER API ---
 @app.get("/v1/dossier/prompts")
@@ -350,7 +401,8 @@ async def list_runs(limit: int = 20, user: dict = Depends(get_current_user)):
     return {"data": runs}
 
 @app.post("/v1/dossier/runs")
-async def start_run(req: RunRequest, user: dict = Depends(get_current_user)):
+@limiter.limit("20/hour")
+async def start_run(request: Request, req: RunRequest, user: dict = Depends(get_current_user)):
     import re
     run_id = f"run-{int(time.time())}-{uuid.uuid4().hex[:10]}"
     engine = _get_engine(req.ollama_url, req.dict())
@@ -379,6 +431,9 @@ async def start_run(req: RunRequest, user: dict = Depends(get_current_user)):
         include_images=bool(req.include_images),
         generate_ai_images=bool(req.generate_ai_images),
     ))
+    audit.record(BASE_DIR / "data", action="dossier.run",
+                 actor_id=user["id"], actor_name=user["username"],
+                 target=run_id, question=req.question[:120])
     return {"run_id": run_id}
 
 @app.get("/v1/dossier/runs/{run_id}/planner")
@@ -1858,7 +1913,8 @@ class CrawlRequest(BaseModel):
     max_pages: int = 25
 
 @app.post("/v1/web/scrape")
-async def web_scrape(req: ScrapeRequest, user: dict = Depends(get_current_user)):
+@limiter.limit("30/minute")
+async def web_scrape(request: Request, req: ScrapeRequest, user: dict = Depends(get_current_user)):
     if not req.url.strip().startswith(("http://", "https://")):
         raise HTTPException(400, "url must start with http:// or https://")
     job_id = f"web-{int(time.time())}-{uuid.uuid4().hex[:8]}"
@@ -1874,7 +1930,8 @@ async def web_scrape(req: ScrapeRequest, user: dict = Depends(get_current_user))
     return {"job_id": job_id}
 
 @app.post("/v1/web/crawl")
-async def web_crawl(req: CrawlRequest, user: dict = Depends(get_current_user)):
+@limiter.limit("5/minute")
+async def web_crawl(request: Request, req: CrawlRequest, user: dict = Depends(get_current_user)):
     if not req.url.strip().startswith(("http://", "https://")):
         raise HTTPException(400, "url must start with http:// or https://")
     if req.max_pages < 1 or req.max_pages > 500:
@@ -2006,7 +2063,8 @@ class AgentRequest(BaseModel):
     prompt: str
 
 @app.post("/v1/web/agent")
-async def web_agent(req: AgentRequest, user: dict = Depends(get_current_user)):
+@limiter.limit("5/minute")
+async def web_agent(request: Request, req: AgentRequest, user: dict = Depends(get_current_user)):
     if not req.prompt.strip():
         raise HTTPException(400, "prompt is required")
     job_id = f"web-{int(time.time())}-{uuid.uuid4().hex[:8]}"
@@ -2346,7 +2404,7 @@ async def _run_audiobook_job(job_id: str, md_path: Path, out_dir: Path, basename
             try:
                 await _xtts_release()
             except Exception as e:
-                print(f"[xtts] release error: {e}")
+                log.warning("xtts release error", extra={"error": str(e)})
 
 AUDIOBOOK_DEFAULT_LLM = "qwen3.6:35b"
 
@@ -2372,7 +2430,7 @@ async def audiobook_llms(user: dict = Depends(get_current_user)):
                 seen[name] = {"name": name, "origin": origin}
     except Exception as e:
         errors.append(f"local ollama: {e}")
-        print(f"[llms] local ollama unreachable: {e}")
+        log.warning("local ollama unreachable", extra={"error": str(e)})
 
     # Ollama Cloud catalog
     api_key = os.getenv("OLLAMA_API_KEY", "")
@@ -2389,7 +2447,7 @@ async def audiobook_llms(user: dict = Depends(get_current_user)):
                     seen[name] = {"name": name, "origin": "cloud"}
         except Exception as e:
             errors.append(f"ollama cloud: {e}")
-            print(f"[llms] ollama cloud unreachable: {e}")
+            log.warning("ollama cloud unreachable", extra={"error": str(e)})
     else:
         errors.append("OLLAMA_API_KEY not set — Ollama Cloud catalog skipped")
 
@@ -2409,7 +2467,7 @@ async def audiobook_llms(user: dict = Depends(get_current_user)):
                     seen[name] = {"name": name, "origin": "deepseek"}
         except Exception as e:
             errors.append(f"deepseek: {e}")
-            print(f"[llms] deepseek unreachable: {e}")
+            log.warning("deepseek unreachable", extra={"error": str(e)})
     else:
         errors.append("DEEPSEEK_API_KEY not set — DeepSeek catalog skipped")
 
@@ -2459,7 +2517,8 @@ class AudiobookFromRunRequest(BaseModel):
     summary_origin: str = "auto"
 
 @app.post("/v1/audiobook/from-run")
-async def audiobook_from_run(req: AudiobookFromRunRequest, user: dict = Depends(get_current_user)):
+@limiter.limit("10/minute")
+async def audiobook_from_run(request: Request, req: AudiobookFromRunRequest, user: dict = Depends(get_current_user)):
     _check_run_access(req.run_id, user)
     run_dir = DATA_DIR / req.run_id
     md_src = run_dir / "report.md"
@@ -2502,7 +2561,9 @@ async def audiobook_from_run(req: AudiobookFromRunRequest, user: dict = Depends(
     return {"job_id": job_id}
 
 @app.post("/v1/audiobook/from-upload")
+@limiter.limit("10/minute")
 async def audiobook_from_upload(
+    request: Request,
     file: UploadFile = File(...),
     voice: str = Form(""),
     speed: float = Form(1.0),
@@ -2558,7 +2619,8 @@ class VoicePreviewRequest(BaseModel):
     text: str = "Bonjour, ceci est un échantillon de ma voix. Hello, this is a voice sample."
 
 @app.post("/v1/audiobook/preview")
-async def audiobook_preview(req: VoicePreviewRequest, user: dict = Depends(get_current_user)):
+@limiter.limit("60/minute")
+async def audiobook_preview(request: Request, req: VoicePreviewRequest, user: dict = Depends(get_current_user)):
     """Generate a 1-sentence MP3 preview for the chosen voice via XTTS-v2.
     Auto-starts the XTTS container if not running (~20-30s cold start)."""
     voice = (req.voice or "").strip() or XTTS_DEFAULT_VOICE
@@ -2675,6 +2737,8 @@ async def delete_run(run_id: str, user: dict = Depends(get_current_user)):
     if task and not task.done(): task.cancel()
     run_dir = DATA_DIR / run_id
     if run_dir.exists(): shutil.rmtree(run_dir)
+    audit.record(BASE_DIR / "data", action="dossier.delete",
+                 actor_id=user["id"], actor_name=user["username"], target=run_id)
     return {"status": "ok"}
 
 @app.post("/v1/servers")

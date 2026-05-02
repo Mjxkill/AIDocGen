@@ -8,6 +8,9 @@ from typing import Any, Callable
 from .config import DossierConfig
 from .llm import LLMClient
 from .utils import emit_progress, markdown_anchor
+from .logging_config import get_logger
+
+log = get_logger("aidocgen.writer")
 
 def _date_instruction() -> str:
     today = date.today().strftime("%d/%m/%Y")
@@ -362,7 +365,7 @@ class Writer:
                     if existing and len(existing) < len(tasks):
                         sections_content = existing
                         start_idx = len(existing)
-                        print(f"RESUME: Found {start_idx}/{len(tasks)} existing sections, continuing from section {start_idx + 1}")
+                        log.info("RESUME: Found / existing sections, continuing from section", extra={"start_idx": start_idx})
                 except Exception:
                     pass
 
