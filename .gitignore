@@ -12,10 +12,8 @@ __pycache__/
 web-ui/node_modules/
 web-ui/dist/
 
-# Application Data
-ollama-ensemble-proxy/data/dossiers/
-ollama-ensemble-proxy/data/servers.json
-ollama-ensemble-proxy/data/llm_logs.json
+# Application Data — all user data / job artifacts stay out of git
+ollama-ensemble-proxy/data/
 
 # Logs
 *.log

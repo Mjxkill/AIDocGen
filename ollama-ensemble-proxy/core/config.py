@@ -59,6 +59,11 @@ class DossierConfig:
     strict_no_fallback: bool
     web_search_engine: str
     web_request_delay: float
+    firecrawl_api_key: str | None
+    firecrawl_crawl_max_pages: int
+    firecrawl_extract_enabled: bool
+    writer_enable_critique: bool
+    coherence_embed_model: str
 
     @classmethod
     def from_env(cls) -> "DossierConfig":
@@ -118,4 +123,9 @@ class DossierConfig:
             strict_no_fallback=env_bool("ENSEMBLE_DOSSIER_STRICT_NO_FALLBACK", False),
             web_search_engine=os.getenv("ENSEMBLE_WEB_SEARCH_ENGINE", "auto").strip().lower(),
             web_request_delay=float(os.getenv("ENSEMBLE_WEB_REQUEST_DELAY", "3.0")),
+            firecrawl_api_key=os.getenv("FIRECRAWL_API_KEY"),
+            firecrawl_crawl_max_pages=int(os.getenv("FIRECRAWL_CRAWL_MAX_PAGES", "10")),
+            firecrawl_extract_enabled=env_bool("FIRECRAWL_EXTRACT_ENABLED", True),
+            writer_enable_critique=env_bool("ENSEMBLE_DOSSIER_WRITER_CRITIQUE", True),
+            coherence_embed_model=os.getenv("ENSEMBLE_DOSSIER_COHERENCE_EMBED_MODEL", "mxbai-embed-large"),
         )

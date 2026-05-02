@@ -4,3 +4,6 @@ httpx==0.28.1
 duckduckgo-search==7.5.1
 beautifulsoup4==4.12.3
 pypdf==5.2.0
+python-jose[cryptography]
+passlib[bcrypt]
+python-multipart

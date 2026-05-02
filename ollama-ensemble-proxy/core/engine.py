@@ -17,7 +17,7 @@ class DossierEngine:
         self.analyst = Analyst(config, self.llm)
         self.writer = Writer(config, self.llm)
 
-    async def run(self, run_id: str, question: str, prompt_type: str = "generic", detail_level: str = "medium", resume: bool = False, language: str = "fr", coder_model: str | None = None, tags: list[str] = None) -> dict[str, Any]:
+    async def run(self, run_id: str, question: str, prompt_type: str = "generic", detail_level: str = "medium", resume: bool = False, language: str = "fr", coder_model: str | None = None, tags: list[str] = None, include_images: bool = True, generate_ai_images: bool = False) -> dict[str, Any]:
         run_dir = Path(self.config.data_dir) / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
         
@@ -34,6 +34,14 @@ class DossierEngine:
         data["language"] = language
         data["tags"] = tags  # Ensure tags are stored
         if coder_model: data["coder_model"] = coder_model
+        data["models"] = {
+            "planner": self.config.planner_model,
+            "writer": self.config.writer_model,
+            "judge": self.config.judge_model,
+            "verify": self.config.verify_model,
+            "extract": self.config.extract_model,
+            "coder": coder_model or self.config.planner_book_model_4_json,
+        }
         save_json(s_path, data)
         
         llm_logs = []
@@ -84,16 +92,32 @@ class DossierEngine:
             # 8. VERIFICATION
             await emit_progress(None, run_dir, "verdicts", f"Vérification de {len(clm['claims'])} affirmations...")
             ver = await self._step(run_dir, "verdicts", resume, None, lambda: self.analyst.verify_claims(clm["claims"], llm_logs, None, run_dir))
-            # 9. WRITING (with tags for focus)
+            # 9. WRITING (with tags for focus + incremental resume)
             await emit_progress(None, run_dir, "sections", "Rédaction des chapitres du dossier...")
-            sec = await self._step(run_dir, "sections", resume, None, lambda: self.writer.write_sections(pla, clm["claims"], llm_logs, None, run_dir, language, tags=tags))
+            # Don't use _step for sections: write_sections handles its own resume via partial sections.json
+            sec = await self.writer.write_sections(pla, clm["claims"], llm_logs, None, run_dir, language, tags=tags)
 
-            # 10. ASSEMBLY
-            report_md, annex_md = await self.writer.assemble_report(pla, sec, clm["claims"], ver, cor)
+            # 9b. ILLUSTRATIONS (corpus images + optional AI gen)
+            if include_images:
+                await emit_progress(None, run_dir, "sections", "Sélection des illustrations...")
+                sec = await self.writer.inject_illustrations(
+                    sec, clm["claims"], cor, run_dir,
+                    generate_ai=generate_ai_images, language=language,
+                )
+
+            # 10. EXECUTIVE SUMMARY
+            await emit_progress(None, run_dir, "sections", "Generation du resume executif...")
+            exec_summary = await self.writer.generate_executive_summary(
+                "\n".join(s["content"] for s in sec.get("sections", [])[:5]),
+                question, llm_logs, language
+            )
+
+            # 11. ASSEMBLY
+            report_md, annex_md = await self.writer.assemble_report(pla, sec, clm["claims"], ver, cor, executive_summary=exec_summary)
             (run_dir / "report.md").write_text(report_md, encoding="utf-8")
             (run_dir / "annexes.md").write_text(annex_md, encoding="utf-8")
             
-            # 11. LATEX & PDF EXPORT
+            # 12. LATEX & PDF EXPORT
             try:
                 from export_latex import generate_latex
                 generate_latex(run_id, data_dir=self.config.data_dir)

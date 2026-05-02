@@ -44,7 +44,7 @@ class LLMClient:
             }
 
         timeout_val = self.config.planner_timeout_seconds
-        if stage in ["writing", "verification", "ranking"]:
+        if stage in ["writing", "verification", "ranking", "critique", "rewrite", "executive_summary"]:
             timeout_val = self.config.writer_timeout_seconds
 
         last_error = None

@@ -2770,6 +2770,16 @@ class DossierEngine:
                     )
                     continue
                 chapter_markdown = self._sanitize_writer_markdown(chapter_markdown)
+                # --- Recency check: verify the writer used recent sources ---
+                chapter_markdown = await self._ensure_recency(
+                    chapter_markdown=chapter_markdown,
+                    claim_batch=claim_batch,
+                    topic=topic,
+                    sq_id=sq_id,
+                    sq_question=sq_question,
+                    llm_logs=llm_logs,
+                    stage_label=f"writer-{sq_id}-recency",
+                )
                 if self._is_duplicate_markdown_block(chapter_markdown, chapter_parts):
                     writer_warnings.append(
                         f"Bloc duplique ignore pour le topic '{topic['title']}' (iteration {iteration})."
@@ -3182,7 +3192,12 @@ class DossierEngine:
         response = await self._ask_text_model(
             model=self.config.verify_model,
             system_prompt=(
-                "You are a strict verifier. Assess whether the claim is corroborated, uncertain, or contradicted. "
+                "You are a strict verifier. Assess whether the claim is corroborated, uncertain, or contradicted "
+                "by the related claims provided. "
+                "IMPORTANT: Do NOT reject claims solely because they mention events or dates beyond your knowledge cutoff. "
+                "If a claim references recent events (2025, 2026, etc.) and is supported by web-sourced data, "
+                "mark it as ACCEPTED or UNCERTAIN, not REJECTED. Only reject claims that are clearly contradicted "
+                "by other provided claims. "
                 "Return JSON only."
             ),
             user_prompt=json.dumps(verify_payload, ensure_ascii=False),
@@ -5453,6 +5468,70 @@ class DossierEngine:
             if overlap >= 0.92 and abs(len(candidate_tokens) - len(block_tokens)) <= 30:
                 return True
         return False
+
+    async def _ensure_recency(
+        self,
+        chapter_markdown: str,
+        claim_batch: list[dict],
+        topic: dict,
+        sq_id: str,
+        sq_question: str,
+        llm_logs: list,
+        stage_label: str,
+    ) -> str:
+        """Check if the chapter uses recent sources from claims. If recent claims
+        exist but the chapter ignores them, rewrite with an explicit instruction."""
+        import datetime
+        current_year = datetime.datetime.now().year
+        recent_years = [str(current_year), str(current_year - 1)]
+
+        # Find recent claims in the batch
+        recent_claims = []
+        for claim in claim_batch:
+            claim_text = json.dumps(claim, ensure_ascii=False)
+            if any(y in claim_text for y in recent_years):
+                recent_claims.append(claim)
+
+        if not recent_claims:
+            return chapter_markdown
+
+        # Check if the chapter references recent years
+        has_recent = any(y in chapter_markdown for y in recent_years)
+        if has_recent:
+            return chapter_markdown
+
+        # Chapter ignores recent sources — rewrite with stronger instruction
+        recent_claims_text = "\n".join(
+            f"- [{c.get('claim_id')}] {c.get('claim_text', c.get('text', ''))}"
+            for c in recent_claims[:15]
+        )
+        rewrite_prompt = (
+            f"Le chapitre ci-dessous sur '{topic.get('title', sq_question)}' ignore complètement "
+            f"les données récentes ({', '.join(recent_years)}) qui sont pourtant présentes dans les sources.\n\n"
+            f"## Sources récentes OBLIGATOIRES à intégrer :\n{recent_claims_text}\n\n"
+            f"## Chapitre actuel à enrichir :\n{chapter_markdown}\n\n"
+            f"CONSIGNE : Réécris ce chapitre en intégrant IMPÉRATIVEMENT les informations récentes "
+            f"ci-dessus. Cite les identifiants [CLM-xxx] dans le texte. "
+            f"Ne supprime pas le contenu existant, enrichis-le avec les données récentes. "
+            f"Réponds uniquement avec le chapitre réécrit en markdown."
+        )
+        rewritten = await self._ask_text_model(
+            model=self.config.writer_model,
+            system_prompt=(
+                "Tu es un rédacteur technique. Tu DOIS intégrer les sources récentes fournies. "
+                "Ne te fie PAS à tes connaissances internes pour les dates et faits récents. "
+                "Utilise UNIQUEMENT les claims fournis comme source de vérité."
+            ),
+            user_prompt=rewrite_prompt,
+            llm_logs=llm_logs,
+            stage=stage_label,
+        )
+        rewritten = rewritten.strip()
+        # Verify the rewrite actually includes recent years
+        if len(rewritten) >= 180 and any(y in rewritten for y in recent_years):
+            return rewritten
+        # If still no recent data, return original (don't make it worse)
+        return chapter_markdown
 
     def _sanitize_writer_markdown(self, text: str) -> str:
         cleaned = str(text or "").strip()

@@ -1,0 +1,338 @@
+%% Pandoc LaTeX template – Professional French research report
+%% Compatible: pdfLaTeX (default) + LuaLaTeX (if available)
+\documentclass[11pt,a4paper,headings=standardclasses]{scrreprt}
+
+%% ── Encoding & Language ──
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[french]{babel}
+
+%% ── Typography ──
+\usepackage{microtype}
+\usepackage{unicode-support}
+\usepackage{setspace}
+\onehalfspacing
+
+\tolerance=2000
+\emergencystretch=1.5em
+\hbadness=2000
+\setlength{\parskip}{0.3\baselineskip plus 0.1\baselineskip}
+\usepackage[htt]{hyphenat}
+
+%% ── Page geometry ──
+\usepackage[
+  top=2.5cm, bottom=2.5cm,
+  left=2.5cm, right=2.5cm,
+  headheight=14pt
+]{geometry}
+
+%% ── Colors ──
+\usepackage{xcolor}
+\definecolor{chapterblue}{HTML}{1B3A5C}
+\definecolor{sectionblue}{HTML}{2C5F8A}
+\definecolor{linkblue}{HTML}{2563EB}
+\definecolor{codebg}{HTML}{F8F9FA}
+\definecolor{codeborder}{HTML}{DEE2E6}
+\definecolor{tabheader}{HTML}{EBF0F5}
+\definecolor{tabstripe}{HTML}{F7F9FB}
+\definecolor{rulecolor}{HTML}{CCCCCC}
+%% Accent colors for insight boxes
+\definecolor{keyinsight}{HTML}{EEF2FF}
+\definecolor{keyinsightborder}{HTML}{6366F1}
+\definecolor{warningbg}{HTML}{FEF3C7}
+\definecolor{warningborder}{HTML}{F59E0B}
+\definecolor{successbg}{HTML}{ECFDF5}
+\definecolor{successborder}{HTML}{10B981}
+%% Cover page colors
+\definecolor{covergold}{HTML}{C9A961}
+\definecolor{coverdeep}{HTML}{0F172A}
+\definecolor{covermid}{HTML}{1E3A5F}
+
+%% ── Headers & Footers ──
+\usepackage{scrlayer-scrpage}
+\pagestyle{scrheadings}
+\clearpairofpagestyles
+\ohead{\pagemark}
+\ihead{\headmark}
+\ofoot{\small\color{gray}\textit{AIDocGen -- Recherche Documentaire}}
+\addtokomafont{pageheadfoot}{\small\color{gray}}
+\KOMAoptions{headsepline=0.4pt}
+
+%% ── Part / Chapter / Section styling ──
+\renewcommand*{\partformat}{\color{chapterblue}\partname~\thepart\autodot}
+\addtokomafont{part}{\color{chapterblue}}
+\addtokomafont{chapter}{\color{chapterblue}}
+\addtokomafont{section}{\color{sectionblue}}
+\addtokomafont{subsection}{\color{sectionblue!80!black}}
+
+\RedeclareSectionCommand[
+  beforeskip=1.5\baselineskip,
+  afterskip=0.8\baselineskip
+]{chapter}
+\RedeclareSectionCommand[
+  beforeskip=1.2\baselineskip,
+  afterskip=0.5\baselineskip
+]{section}
+\RedeclareSectionCommand[
+  beforeskip=0.8\baselineskip,
+  afterskip=0.3\baselineskip
+]{subsection}
+
+%% ── Hyperlinks ──
+\usepackage{hyperref}
+\hypersetup{
+  colorlinks=true,
+  linkcolor=chapterblue,
+  urlcolor=linkblue,
+  citecolor=chapterblue,
+  bookmarks=true,
+  bookmarksopen=true,
+  bookmarksdepth=3,
+  pdfauthor={$author$},
+  pdftitle={$title$}
+}
+\usepackage{bookmark}
+
+%% ── Tables ──
+\usepackage{calc}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{multirow}
+\usepackage{colortbl}
+\usepackage{tabularx}
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+
+\setlength{\heavyrulewidth}{0.08em}
+\setlength{\lightrulewidth}{0.04em}
+\setlength{\aboverulesep}{0.4ex}
+\setlength{\belowrulesep}{0.4ex}
+\renewcommand{\arraystretch}{1.3}
+
+\usepackage{etoolbox}
+
+%% ── Lists ──
+\usepackage{enumitem}
+\setlist[itemize]{
+  leftmargin=1.5em,
+  labelsep=0.5em,
+  itemsep=0.2\baselineskip,
+  parsep=0pt
+}
+\setlist[itemize,1]{label={\color{sectionblue}\textbullet}}
+\setlist[itemize,2]{label={\color{sectionblue!60}--}}
+\setlist[enumerate]{
+  leftmargin=1.8em,
+  labelsep=0.5em,
+  itemsep=0.2\baselineskip,
+  parsep=0pt
+}
+
+%% ── tcolorbox: code blocks + insight boxes ──
+\usepackage{tcolorbox}
+\tcbuselibrary{breakable, skins}
+
+%% Code blocks
+\usepackage{fancyvrb}
+$if(highlighting-macros)$
+$highlighting-macros$
+$endif$
+
+\usepackage{fvextra}
+\DefineVerbatimEnvironment{Highlighting}{Verbatim}{
+  commandchars=\\\{\},
+  fontsize=\footnotesize,
+  breaklines=true,
+  breakanywhere=true
+}
+\renewenvironment{Shaded}{%
+  \begin{tcolorbox}[
+    enhanced, breakable,
+    colback=codebg, colframe=codeborder,
+    boxrule=0.4pt, arc=3pt,
+    left=6pt, right=6pt, top=4pt, bottom=4pt
+  ]%
+}{%
+  \end{tcolorbox}%
+}
+
+%% ── KEY INSIGHT BOX (purple/indigo) ──
+\newtcolorbox{keyinsightbox}[1][Point Cl\'{e}]{
+  enhanced, breakable,
+  colback=keyinsight,
+  colframe=keyinsightborder,
+  boxrule=1pt,
+  arc=4pt,
+  left=12pt, right=12pt, top=10pt, bottom=10pt,
+  fonttitle=\bfseries\sffamily\color{keyinsightborder},
+  title={#1},
+  attach boxed title to top left={xshift=10pt, yshift=-\tcboxedtitleheight/2},
+  boxed title style={colback=white, colframe=keyinsightborder, boxrule=0.6pt, arc=2pt},
+}
+
+%% ── WARNING BOX (amber) ──
+\newtcolorbox{warningbox}[1][Attention]{
+  enhanced, breakable,
+  colback=warningbg,
+  colframe=warningborder,
+  boxrule=1pt,
+  arc=4pt,
+  left=12pt, right=12pt, top=10pt, bottom=10pt,
+  fonttitle=\bfseries\sffamily\color{warningborder},
+  title={#1},
+  attach boxed title to top left={xshift=10pt, yshift=-\tcboxedtitleheight/2},
+  boxed title style={colback=white, colframe=warningborder, boxrule=0.6pt, arc=2pt},
+}
+
+%% ── SUCCESS / CONCLUSION BOX (green) ──
+\newtcolorbox{successbox}[1][R\'{e}sultat]{
+  enhanced, breakable,
+  colback=successbg,
+  colframe=successborder,
+  boxrule=1pt,
+  arc=4pt,
+  left=12pt, right=12pt, top=10pt, bottom=10pt,
+  fonttitle=\bfseries\sffamily\color{successborder},
+  title={#1},
+  attach boxed title to top left={xshift=10pt, yshift=-\tcboxedtitleheight/2},
+  boxed title style={colback=white, colframe=successborder, boxrule=0.6pt, arc=2pt},
+}
+
+%% ── Block quotes ──
+\usepackage{mdframed}
+\renewenvironment{quote}{%
+  \begin{mdframed}[
+    linewidth=2pt,
+    linecolor=sectionblue!40,
+    backgroundcolor=sectionblue!5,
+    leftmargin=0pt,
+    innerleftmargin=12pt,
+    innerrightmargin=12pt,
+    innertopmargin=8pt,
+    innerbottommargin=8pt,
+    skipabove=\baselineskip,
+    skipbelow=\baselineskip
+  ]
+  \itshape\color{gray!80!black}%
+}{%
+  \end{mdframed}%
+}
+
+%% ── Graphics ──
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage{caption}
+\captionsetup[figure]{font=small,skip=4pt}
+
+%% ── Math ──
+\usepackage{amsmath}
+\usepackage{amssymb}
+
+%% ── Tight list (pandoc) ──
+\providecommand{\tightlist}{\setlength{\itemsep}{0pt}\setlength{\parskip}{0pt}}
+
+%% ── CSL references (pandoc) ──
+$if(csl-refs)$
+\newlength{\cslhangindent}
+\setlength{\cslhangindent}{1.5em}
+\newenvironment{CSLReferences}[2]{}{}
+$endif$
+
+%% ── Prevent floats from drifting past sections ──
+\usepackage[section]{placeins}
+
+%% ── Drawing (for cover page) ──
+\usepackage{tikz}
+\usetikzlibrary{calc}
+
+%% ══════════════════════════════════════════════
+%% DOCUMENT
+%% ══════════════════════════════════════════════
+\begin{document}
+
+%% ══════════════════════════════════════════════
+%% COVER PAGE – Professional dark theme
+%% ══════════════════════════════════════════════
+\begin{titlepage}
+  \newgeometry{margin=0pt}
+  \begin{tikzpicture}[remember picture, overlay]
+    %% Background
+    \fill[coverdeep] (current page.south west) rectangle (current page.north east);
+
+    %% Geometric accent shapes
+    \fill[covermid, opacity=0.6]
+      (current page.north west) -- ++(0,-8cm) -- ++(21cm,0) -- cycle;
+    \fill[covermid, opacity=0.3]
+      (current page.south east) -- ++(0,6cm) -- ++(-21cm,0) -- cycle;
+
+    %% Gold accent lines
+    \draw[covergold, line width=2pt]
+      ([yshift=-10cm]current page.north west) -- ([yshift=-10cm]current page.north east);
+    \draw[covergold, line width=0.5pt]
+      ([yshift=-10.3cm]current page.north west) -- ([yshift=-10.3cm]current page.north east);
+    \draw[covergold, line width=2pt]
+      ([yshift=7cm]current page.south west) -- ([yshift=7cm]current page.south east);
+    \draw[covergold, line width=0.5pt]
+      ([yshift=6.7cm]current page.south west) -- ([yshift=6.7cm]current page.south east);
+
+    %% Decorative dot grid
+    \foreach \x in {2,3,...,19} {
+      \foreach \y in {0.5,1,...,2.5} {
+        \fill[covergold, opacity=0.15] (\x cm, \y cm) circle (0.5pt);
+      }
+    }
+
+    %% Title block
+    \node[anchor=center, text width=16cm, align=center]
+      at ([yshift=-1cm]current page.center) {
+        {\fontsize{28}{34}\selectfont\bfseries\color{white}
+         $title$ \par}
+      };
+
+    %% Gold divider
+    \node[anchor=center] at ([yshift=-4cm]current page.center) {
+      {\color{covergold}\rule{8cm}{0.8pt}}
+    };
+
+    %% Author
+    \node[anchor=center] at ([yshift=-5.5cm]current page.center) {
+      {\Large\color{white!80} $author$ \par}
+    };
+
+    %% Date
+    \node[anchor=center] at ([yshift=-6.8cm]current page.center) {
+      {\large\color{white!60} $date$ \par}
+    };
+
+    %% Footer badge
+    \node[anchor=south, text width=14cm, align=center]
+      at ([yshift=2.5cm]current page.south) {
+        {\small\color{covergold}\textsc{Dossier de Recherche Approfondie}}\\[4pt]
+        {\footnotesize\color{white!50}
+         Document g\'{e}n\'{e}r\'{e} par le syst\`{e}me de recherche documentaire AIDocGen\\
+         Recherche web automatis\'{e}e
+         \textbullet{} V\'{e}rification factuelle IA
+         \textbullet{} R\'{e}daction multi-passes}
+      };
+  \end{tikzpicture}
+  \restoregeometry
+\end{titlepage}
+
+%% Blank page after cover
+\thispagestyle{empty}\mbox{}\clearpage
+
+%% ── Table of contents ──
+$if(toc)$
+{
+  \hypersetup{linkcolor=chapterblue}
+  \setcounter{tocdepth}{$toc-depth$}
+  \tableofcontents
+  \clearpage
+}
+$endif$
+
+%% ── Body ──
+$body$
+
+\end{document}
