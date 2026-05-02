@@ -34,7 +34,7 @@ Légende effort : `S` < 4h · `M` 0,5–2 jours · `L` > 2 jours · `XL` > 1 sem
 | 12 | **Notifications email + webhook** sur fin de job | M | ☐ | SMTP via env. Préférence par user (immédiat / digest / off). Webhook URL custom par user. |
 | 13 | **Recherche full-text** dans dossiers terminés | M | ☐ | Meilisearch local ou Postgres FTS sur `report.md`. |
 | 14 | **Diff entre deux runs** | M | ☐ | UI side-by-side ou wikidiff sur les sections. |
-| 15 | **Cost tracker par job + agrégat user/mois** | M | ☐ | Tracker calls: Firecrawl pages, DeepSeek tokens, OpenAI TTS chars, etc. Tarifs en config. |
+| 15 | **Cost tracker par job + agrégat user/mois** | M | ☑ | core/cost.py: tarifs DeepSeek/Firecrawl/OpenAI, append-only data/cost_log.jsonl. Hooks Firecrawl scrape/crawl/agent/parse + DeepSeek tokens (audiobook subprocess via env). Endpoints /v1/costs/me et /v1/costs/all (admin) avec filtre period=month. |
 | 16 | **Reset password par email + invitation lien email** | S | ☐ | Token signé HMAC à durée limitée. |
 | 17 | **Code-splitting frontend** (lazy-load Tools/Wiki/Users) | S | ☐ partiel | Wiki extrait en chunk séparé (15 Ko / 4.5 Ko gzip), bundle principal 363→351 Ko. Tools encore inline (~1500 lignes), à extraire dans une session future. |
 

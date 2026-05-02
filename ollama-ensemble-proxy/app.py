@@ -27,7 +27,7 @@ from core.config import DossierConfig
 from core.engine import DossierEngine
 from core.auth import get_current_user, get_admin_user, create_access_token, verify_password, get_password_hash, _get_users, _save_users, ACCESS_TOKEN_EXPIRE_MINUTES
 from core.logging_config import configure_logging, get_logger
-from core import audit
+from core import audit, cost
 
 configure_logging()
 log = get_logger("aidocgen.app")
@@ -360,6 +360,26 @@ async def delete_user(username: str, admin: dict = Depends(get_admin_user)):
 async def audit_log(limit: int = 200, action: str | None = None,
                     admin: dict = Depends(get_admin_user)):
     return {"data": audit.tail(BASE_DIR / "data", n=limit, action_filter=action)}
+
+# --- COST TRACKING ---
+def _start_of_month_ts() -> int:
+    """Return the Unix timestamp of the start of the current UTC month."""
+    t = time.gmtime()
+    return int(time.mktime((t.tm_year, t.tm_mon, 1, 0, 0, 0, 0, 0, 0))
+               - time.timezone)
+
+@app.get("/v1/costs/me")
+async def my_costs(period: str = "month", current_user: dict = Depends(get_current_user)):
+    """Return the current user's cost summary.
+    period = 'month' (default, current calendar month UTC) or 'all'."""
+    since_ts = _start_of_month_ts() if period == "month" else None
+    return cost.summary(BASE_DIR / "data", user_id=current_user["id"], since_ts=since_ts)
+
+@app.get("/v1/costs/all")
+async def all_costs(period: str = "month", admin: dict = Depends(get_admin_user)):
+    """Admin-only: aggregate costs across all users."""
+    since_ts = _start_of_month_ts() if period == "month" else None
+    return cost.summary(BASE_DIR / "data", since_ts=since_ts)
 
 # --- DOSSIER API ---
 @app.get("/v1/dossier/prompts")
@@ -924,6 +944,12 @@ async def _run_pdf_job(job_id: str, mode: str, model: str, pdf_path: Path, out_p
                 meta = payload.get("metadata") or {}
                 title = meta.get("title") or pdf_path.stem
                 out_path.write_text(f"# {title}\n\n{md}\n", encoding="utf-8")
+                # Cost: parse = 1 Firecrawl credit
+                st = _read_pdf_status(job_id) or {}
+                cost.record(BASE_DIR / "data", provider="firecrawl", kind="credit",
+                            model="parse", units=1.0,
+                            user_id=st.get("owner_id"), user_name=st.get("owner_name"),
+                            job_id=job_id, filename=pdf_path.name)
                 await _update(state="completed", stage="completed",
                               output_size=out_path.stat().st_size)
             except Exception as e:
@@ -1793,6 +1819,12 @@ async def _run_web_scrape(job_id: str, url: str):
         body = page["markdown"] or ""
         title = page.get("title") or url
         out.write_text(f"# {title}\n\n_Source: {url}_\n\n{body}\n", encoding="utf-8")
+        # Cost tracking: scrape = 1 Firecrawl credit
+        st = _read_web_status(job_id) or {}
+        cost.record(BASE_DIR / "data", provider="firecrawl", kind="credit",
+                    model="scrape", units=1.0,
+                    user_id=st.get("owner_id"), user_name=st.get("owner_name"),
+                    job_id=job_id, url=url)
         await _u(state="completed", stage="completed",
                  output_name=out.name, output_size=out.stat().st_size,
                  page_title=title, page_url=page.get("url", url))
@@ -1871,6 +1903,12 @@ async def _run_web_crawl(job_id: str, root_url: str, max_pages: int):
                     z.write(job_dir / "INDEX.md", arcname="INDEX.md")
                     for f in pages_dir.iterdir():
                         z.write(f, arcname=f"pages/{f.name}")
+                # Cost tracking: 1 credit per crawled page
+                st = _read_web_status(job_id) or {}
+                cost.record(BASE_DIR / "data", provider="firecrawl", kind="credit",
+                            model="crawl", units=float(wrote),
+                            user_id=st.get("owner_id"), user_name=st.get("owner_name"),
+                            job_id=job_id, url=root_url, pages=wrote)
                 await _u(state="completed", stage="completed",
                          output_name=zip_path.name, output_size=zip_path.stat().st_size,
                          pages_count=wrote)
@@ -2041,9 +2079,15 @@ async def _run_web_agent(job_id: str, prompt: str):
                     f"Credits used: {res.get('creditsUsed', 0)}_\n\n{body}\n",
                     encoding="utf-8",
                 )
+                credits = res.get("creditsUsed", 0) or 0
+                st = _read_web_status(job_id) or {}
+                cost.record(BASE_DIR / "data", provider="firecrawl", kind="credit",
+                            model="agent", units=float(credits),
+                            user_id=st.get("owner_id"), user_name=st.get("owner_name"),
+                            job_id=job_id, prompt=prompt[:200])
                 await _u(state="completed", stage="completed",
                          output_name=out.name, output_size=out.stat().st_size,
-                         credits_used=res.get("creditsUsed", 0),
+                         credits_used=credits,
                          model=res.get("model", ""))
                 return
             if status in ("failed", "cancelled"):
@@ -2354,10 +2398,17 @@ async def _run_audiobook_job(job_id: str, md_path: Path, out_dir: Path, basename
         adapt_cache = AUDIOBOOK_JOBS_DIR / job_id / "adapt_cache"
         adapt_cache.mkdir(parents=True, exist_ok=True)
         progress_path = AUDIOBOOK_JOBS_DIR / job_id / "progress.json"
+        # Subprocess cost tracking: it writes its own jsonl entries; we tag them
+        # with the user/job context via env vars.
+        st = _read_audiobook_status(job_id) or {}
         sub_env = {
             **os.environ,
             "ADAPT_CACHE_DIR": str(adapt_cache),
             "ADAPT_PROGRESS_PATH": str(progress_path),
+            "COST_LOG_PATH": str((BASE_DIR / "data" / "cost_log.jsonl")),
+            "COST_USER_ID": st.get("owner_id") or "",
+            "COST_USER_NAME": st.get("owner_name") or "",
+            "COST_JOB_ID": job_id,
         }
         with log_path.open("a" if resumed else "w") as logf:
             if resumed:

@@ -385,6 +385,38 @@ def _split_md_into_smallest_sections(
     return [(c, t == "passthrough") for c, t in out]
 
 
+def _record_cost(provider: str, model: str, kind: str, units: float, **extra) -> None:
+    """Append a cost entry to COST_LOG_PATH if set. Best-effort, never raises."""
+    import os as _os
+    path = _os.getenv("COST_LOG_PATH")
+    if not path:
+        return
+    try:
+        # Tariffs (kept in sync with core/cost.py)
+        tariffs = {
+            ("deepseek", "deepseek-v4-flash", "input_token"):  0.27e-6,
+            ("deepseek", "deepseek-v4-flash", "output_token"): 1.10e-6,
+            ("deepseek", "deepseek-v4-pro",   "input_token"):  0.55e-6,
+            ("deepseek", "deepseek-v4-pro",   "output_token"): 2.19e-6,
+        }
+        rate = tariffs.get((provider, model, kind), 0.0)
+        cost_usd = round(rate * units, 6)
+        entry = {
+            "ts": int(time.time()),
+            "ts_iso": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "provider": provider, "kind": kind, "model": model,
+            "units": units, "cost_usd": cost_usd,
+            "user_id": _os.getenv("COST_USER_ID") or None,
+            "user_name": _os.getenv("COST_USER_NAME") or None,
+            "job_id": _os.getenv("COST_JOB_ID") or None,
+        }
+        if extra: entry["details"] = extra
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception:
+        pass  # cost tracking must not break the job
+
+
 def _llm_call(payload_obj: dict, base_url: str, api_key: str,
               max_attempts: int = 3, schema: str = "ollama") -> str:
     """schema: 'ollama' (Ollama-native /api/chat) or 'openai' (/chat/completions)."""
@@ -410,6 +442,7 @@ def _llm_call(payload_obj: dict, base_url: str, api_key: str,
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     last_err: Exception | None = None
+    model = payload_obj.get("model", "")
     for attempt in range(1, max_attempts + 1):
         try:
             req = urllib.request.Request(endpoint, data=body, headers=headers)
@@ -418,6 +451,18 @@ def _llm_call(payload_obj: dict, base_url: str, api_key: str,
             if schema == "openai":
                 choices = d.get("choices") or []
                 content = (choices[0].get("message") or {}).get("content", "").strip() if choices else ""
+                # OpenAI-compatible APIs (DeepSeek) return usage with prompt/completion tokens
+                usage = d.get("usage") or {}
+                pin = usage.get("prompt_tokens") or 0
+                pout = usage.get("completion_tokens") or 0
+                # Only record cost for known DeepSeek-server models (cloud-tagged
+                # via Ollama is bundled in the subscription, $0).
+                if model.startswith(("deepseek-v3", "deepseek-v4", "deepseek-chat",
+                                     "deepseek-reasoner")) and (pin or pout):
+                    if pin:
+                        _record_cost("deepseek", model, "input_token", pin)
+                    if pout:
+                        _record_cost("deepseek", model, "output_token", pout)
             else:
                 content = (d.get("message") or {}).get("content", "").strip()
             if content:
