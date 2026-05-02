@@ -29,7 +29,8 @@ def _get_users():
             "username": "admin",
             "hashed_password": pwd_context.hash("admin"),
             "role": "admin",
-            "id": "u-admin"
+            "id": "u-admin",
+            "must_change_password": True,
         }
         USERS_FILE.parent.mkdir(parents=True, exist_ok=True)
         with open(USERS_FILE, "w") as f:

@@ -198,11 +198,43 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
     user = next((u for u in users if u["username"] == form_data.username), None)
     if not user or not verify_password(form_data.password, user["hashed_password"]):
         raise HTTPException(status_code=400, detail="Bad credentials")
-    return {"access_token": create_access_token(data={"sub": user["username"]}), "token_type": "bearer", "role": user.get("role", "user")}
+    return {
+        "access_token": create_access_token(data={"sub": user["username"]}),
+        "token_type": "bearer",
+        "role": user.get("role", "user"),
+        "must_change_password": bool(user.get("must_change_password", False)),
+    }
 
 @app.get("/v1/auth/me")
 async def read_users_me(current_user: dict = Depends(get_current_user)):
-    return {"username": current_user["username"], "role": current_user["role"], "id": current_user["id"]}
+    return {
+        "username": current_user["username"],
+        "role": current_user["role"],
+        "id": current_user["id"],
+        "must_change_password": bool(current_user.get("must_change_password", False)),
+    }
+
+class SelfPasswordChange(BaseModel):
+    current_password: str
+    new_password: str
+
+@app.post("/v1/auth/change-password")
+async def change_own_password(payload: SelfPasswordChange,
+                              current_user: dict = Depends(get_current_user)):
+    """Self-service password change. Used by the forced-change-on-first-login flow
+    AND by any user who wants to update their own password."""
+    if not payload.new_password or len(payload.new_password) < 4:
+        raise HTTPException(400, "new password must be at least 4 characters")
+    users = _get_users()
+    user = next((u for u in users if u["id"] == current_user["id"]), None)
+    if not user:
+        raise HTTPException(404, "user not found")
+    if not verify_password(payload.current_password, user["hashed_password"]):
+        raise HTTPException(400, "current password is incorrect")
+    user["hashed_password"] = get_password_hash(payload.new_password)
+    user["must_change_password"] = False
+    _save_users(users)
+    return {"status": "ok"}
 
 @app.get("/v1/auth/preferences")
 async def get_preferences(current_user: dict = Depends(get_current_user)):
@@ -250,6 +282,7 @@ async def create_user(payload: UserCreate, admin: dict = Depends(get_admin_user)
         "username": payload.username.strip(),
         "hashed_password": get_password_hash(payload.password),
         "role": payload.role,
+        "must_change_password": True,
     }
     users.append(new_user)
     _save_users(users)
@@ -262,6 +295,7 @@ async def change_user_password(username: str, payload: PasswordChange, admin: di
     if not user:
         raise HTTPException(404, "user not found")
     user["hashed_password"] = get_password_hash(payload.password)
+    user["must_change_password"] = True  # force the user to pick their own
     _save_users(users)
     return {"status": "ok"}
 

@@ -22,7 +22,7 @@ Légende effort : `S` < 4h · `M` 0,5–2 jours · `L` > 2 jours · `XL` > 1 sem
 | # | Item | Effort | Statut | Notes |
 |---|------|--------|--------|-------|
 | 7 | **Secrets manager** (sops + age, ou Docker secrets, ou Vault) | M | ☐ | `OLLAMA_API_KEY`, `DEEPSEEK_API_KEY`, `OPENAI_API_KEY`, `FIRECRAWL_API_KEY`, `JWT_SECRET_KEY`, `DIFY_*`. |
-| 8 | **Forcer changement mdp admin/admin à la 1ère connexion** | S | ☐ | Flag `must_change_password` dans `users.json`. |
+| 8 | **Forcer changement mdp admin/admin à la 1ère connexion** | S | ☑ | Flag `must_change_password` posé sur défaut admin + reset admin + create user. Modal forcée frontend. |
 | 9 | **Rate limiting** par user (slowapi) | S | ☐ | Endpoints sensibles: `/dossier/runs`, `/web/agent`, `/audiobook/*`, `/auth/login`. |
 | 10 | **2FA TOTP** (au moins admin) | M | ☐ | pyotp + QR code dans le profil. |
 | 11 | **Audit log** (login, run launched, doc deleted, etc.) | S | ☐ | Append-only `data/audit.log`. Vue admin. |
@@ -36,7 +36,7 @@ Légende effort : `S` < 4h · `M` 0,5–2 jours · `L` > 2 jours · `XL` > 1 sem
 | 14 | **Diff entre deux runs** | M | ☐ | UI side-by-side ou wikidiff sur les sections. |
 | 15 | **Cost tracker par job + agrégat user/mois** | M | ☐ | Tracker calls: Firecrawl pages, DeepSeek tokens, OpenAI TTS chars, etc. Tarifs en config. |
 | 16 | **Reset password par email + invitation lien email** | S | ☐ | Token signé HMAC à durée limitée. |
-| 17 | **Code-splitting frontend** (lazy-load Tools/Wiki/Users) | S | ☐ | Vite + React.lazy. |
+| 17 | **Code-splitting frontend** (lazy-load Tools/Wiki/Users) | S | ☐ partiel | Wiki extrait en chunk séparé (15 Ko / 4.5 Ko gzip), bundle principal 363→351 Ko. Tools encore inline (~1500 lignes), à extraire dans une session future. |
 
 ## 🔵 Pro-grade (ambitieux, grand impact)
 
@@ -55,9 +55,9 @@ Légende effort : `S` < 4h · `M` 0,5–2 jours · `L` > 2 jours · `XL` > 1 sem
 | # | Item | Effort | Statut | Notes |
 |---|------|--------|--------|-------|
 | 25 | **Skeletons de chargement** + animations | S | ☐ | Composants `<Skeleton />` pour run-grid, jobs lists, modals. |
-| 26 | **Thème clair / sombre** | S | ☐ | Toggle dans la sidebar. CSS vars déjà presque OK. |
+| 26 | **Thème clair / sombre** | S | ☑ | `data-theme=light|dark` sur `<html>`, surcharge des CSS vars. Toggle ☀/☾ dans la sidebar. Persiste en localStorage. Détection initiale via `prefers-color-scheme`. |
 | 27 | **Audit accessibilité** (ARIA, contraste, nav clavier) | M | ☐ | Tester avec axe-core ou Lighthouse. |
-| 28 | **Empty states soignés** sur chaque vue | S | ☐ | « Aucun dossier — voici comment commencer ». Mini-tutoriel. |
+| 28 | **Empty states soignés** sur chaque vue | S | ☑ | Composant `<EmptyState />` réutilisable (icône + titre + hint). Posé sur dashboard runs + 4 sous-onglets Tools (PDF/Video/Audio/Audiobook). |
 
 ---
 

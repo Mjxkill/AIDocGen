@@ -1,7 +1,9 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, lazy, Suspense } from 'react';
 import axios from 'axios';
 import './App.css';
 import { useT, LOCALES, type Locale } from './i18n';
+
+const Wiki = lazy(() => import('./pages/Wiki'));
 
 // --- Types ---
 interface Metrics { cpu_percent: number; ram_percent: number; gpus: any[]; }
@@ -23,6 +25,48 @@ const NavIcon = ({ type, ...props }: { type: string } & React.SVGProps<SVGSVGEle
     logout: "M17 7l-1.41 1.41L18.17 11H8v2h10.17l-2.58 2.58L17 17l5-5zM4 5h8V3H4c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h8v-2H4V5z",
   };
   return <svg viewBox="0 0 24 24" fill="currentColor" {...props}><path d={paths[type] || paths.dashboard}/></svg>;
+};
+
+// ── EMPTY STATE ──
+const EmptyState = ({ icon, title, hint }: { icon: string; title: string; hint?: string }) => (
+  <div style={{
+    padding: '40px 24px',
+    textAlign: 'center',
+    color: 'var(--text-muted)',
+    background: 'var(--bg-surface)',
+    border: '1px dashed var(--border)',
+    borderRadius: 'var(--radius)',
+  }}>
+    <div style={{fontSize: 36, lineHeight: 1, marginBottom: 12, opacity: 0.6}}>{icon}</div>
+    <div style={{fontSize: 14, color: 'var(--text-secondary)', marginBottom: 4}}>{title}</div>
+    {hint && <div style={{fontSize: 12, opacity: 0.8}}>{hint}</div>}
+  </div>
+);
+
+// ── THEME TOGGLE (light / dark) ──
+function applyTheme(theme: 'light' | 'dark') {
+  document.documentElement.dataset.theme = theme;
+  localStorage.setItem('theme', theme);
+}
+
+// Apply on first load (before React mounts paints, avoid flicker)
+const _initialTheme = (localStorage.getItem('theme') as 'light' | 'dark') ||
+  (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+applyTheme(_initialTheme);
+
+const ThemeToggle = () => {
+  const [theme, setTheme] = useState<'light' | 'dark'>(_initialTheme);
+  const toggle = () => {
+    const next = theme === 'dark' ? 'light' : 'dark';
+    setTheme(next);
+    applyTheme(next);
+  };
+  return (
+    <button onClick={toggle} title={theme === 'dark' ? 'Passer en clair' : 'Passer en sombre'}
+            className="nav-item" style={{width: 40, height: 40, fontSize: 16}}>
+      {theme === 'dark' ? '☀' : '☾'}
+    </button>
+  );
 };
 
 // ── LANGUAGE PICKER ──
@@ -688,9 +732,7 @@ const PdfTools = ({ servers, srvIdx }: { servers: any[], srvIdx: number }) => {
 
       <div className="run-grid" style={{marginTop: 16}}>
         {jobs.length === 0 && (
-          <div style={{color: 'var(--text-muted)', fontSize: 12, padding: 20, textAlign: 'center'}}>
-            {t('tools.empty.pdf')}
-          </div>
+          <EmptyState icon="📄" title={t('tools.empty.pdf')} hint="Charge un PDF ou un .docx ci-dessus pour le convertir en Markdown propre." />
         )}
         {jobs.map(job => (
           <div key={job.job_id} className="run-row">
@@ -908,9 +950,7 @@ const VideoTools = () => {
 
       <div className="run-grid" style={{marginTop: 16}}>
         {jobs.length === 0 && (
-          <div style={{color: 'var(--text-muted)', fontSize: 12, padding: 20, textAlign: 'center'}}>
-            {t('tools.empty.video')}
-          </div>
+          <EmptyState icon="🎬" title={t('tools.empty.video')} hint="Upload une vidéo, choisis un mode, le pipeline découpe en chunks et transcrit avec nemotron3." />
         )}
         {jobs.map(job => {
           const pct = job.progress?.pct ?? (job.state === 'completed' ? 100 : 0);
@@ -1126,9 +1166,7 @@ const AudioTools = () => {
 
       <div className="run-grid" style={{marginTop: 16}}>
         {jobs.length === 0 && (
-          <div style={{color: 'var(--text-muted)', fontSize: 12, padding: 20, textAlign: 'center'}}>
-            {t('tools.empty.audio')}
-          </div>
+          <EmptyState icon="🎙" title={t('tools.empty.audio')} hint="Charge un mp3 ou un wav, on transcrit en Markdown." />
         )}
         {jobs.map(job => {
           const pct = job.progress?.pct ?? (job.state === 'completed' ? 100 : 0);
@@ -1329,9 +1367,7 @@ const WebTools = () => {
 
       <div className="run-grid" style={{marginTop: 16}}>
         {jobs.length === 0 && (
-          <div style={{color: 'var(--text-muted)', fontSize: 12, padding: 20, textAlign: 'center'}}>
-            {t('tools.empty.pdf')}
-          </div>
+          <EmptyState icon="📄" title={t('tools.empty.pdf')} hint="Charge un PDF ou un .docx ci-dessus pour le convertir en Markdown propre." />
         )}
         {jobs.map(job => {
           const pct = job.progress?.pct ?? (job.state === 'completed' ? 100 : 0);
@@ -1620,9 +1656,7 @@ const AudiobookTools = () => {
 
       <div className="run-grid" style={{marginTop: 16}}>
         {jobs.length === 0 && (
-          <div style={{color: 'var(--text-muted)', fontSize: 12, padding: 20, textAlign: 'center'}}>
-            Aucun livre audio pour l'instant.
-          </div>
+          <EmptyState icon="🎧" title="Aucun livre audio pour l'instant." hint="Choisis un dossier ou upload un .md, sélectionne une voix XTTS-v2, et lance la conversion en M4B." />
         )}
         {jobs.map(job => {
           const pct = job.progress?.pct ?? (job.state === 'completed' ? 100 : 0);
@@ -1854,199 +1888,57 @@ const Tools = ({ servers, srvIdx }: { servers: any[], srvIdx: number }) => {
   );
 };
 
-// ── WIKI (available to all authenticated users) ──
-const WIKI_SECTION_IDS = [
-  'intro', 'login', 'dossier', 'fields', 'plan', 'runs', 'report',
-  'pdf', 'video', 'audio', 'prefs', 'admin', 'troubleshoot',
-];
+// ── FORCED PASSWORD CHANGE (shown on first login) ──
+const ForcePasswordChange = ({ onDone }: { onDone: () => void }) => {
+  const { t } = useT();
+  const [cur, setCur] = useState('');
+  const [pw1, setPw1] = useState('');
+  const [pw2, setPw2] = useState('');
+  const [busy, setBusy] = useState(false);
 
-const Wiki = () => {
-  const { t, locale } = useT();
-  const [active, setActive] = useState('intro');
-  const scrollTo = (id: string) => {
-    setActive(id);
-    document.getElementById(`wiki-${id}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  const submit = async () => {
+    if (pw1.length < 4) { alert('Mot de passe trop court (min 4 caractères)'); return; }
+    if (pw1 !== pw2) { alert('Les mots de passe ne correspondent pas'); return; }
+    setBusy(true);
+    try {
+      await axios.post('/v1/auth/change-password',
+        { current_password: cur, new_password: pw1 });
+      onDone();
+    } catch (e: any) {
+      alert((t('common.error')) + ': ' + (e?.response?.data?.detail || e.message));
+    } finally {
+      setBusy(false);
+    }
   };
+
   return (
-    <div className="wiki-layout" style={{display: 'grid', gridTemplateColumns: '220px 1fr', gap: 20, alignItems: 'start'}}>
-      <aside className="create-card wiki-toc" style={{position: 'sticky', top: 20, padding: 12}}>
-        <h3 style={{fontSize: 12, color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: 10}}>{t('wiki.contents')}</h3>
-        {WIKI_SECTION_IDS.map(id => (
-          <button key={id} onClick={() => scrollTo(id)}
-                  className={`nav-item ${active === id ? 'active' : ''}`}
-                  style={{width: '100%', justifyContent: 'flex-start', padding: '6px 10px', textAlign: 'left', fontSize: 12, borderRadius: 4, marginBottom: 2}}>
-            {t(`wiki.s.${id}`)}
+    <div className="detail-overlay" style={{justifyContent: 'center', alignItems: 'center'}}>
+      <div className="detail-panel" style={{width: 420, height: 'auto', maxHeight: '90vh',
+                                              borderLeft: 'none', borderRadius: 8}}
+           onClick={e => e.stopPropagation()}>
+        <div className="panel-header">
+          <h2 style={{margin: 0, fontSize: 16}}>🔒 Changement de mot de passe requis</h2>
+        </div>
+        <div className="panel-body">
+          <p style={{fontSize: 13, color: 'var(--text-secondary)', marginBottom: 16}}>
+            Tu utilises encore le mot de passe par défaut (ou un mot de passe défini par
+            un admin). Choisis-en un nouveau pour continuer.
+          </p>
+          <input type="password" placeholder="Mot de passe actuel"
+                 value={cur} onChange={e => setCur(e.target.value)}
+                 style={{width: '100%', marginBottom: 10}} autoFocus />
+          <input type="password" placeholder="Nouveau mot de passe"
+                 value={pw1} onChange={e => setPw1(e.target.value)}
+                 style={{width: '100%', marginBottom: 10}} />
+          <input type="password" placeholder="Confirme le nouveau mot de passe"
+                 value={pw2} onChange={e => setPw2(e.target.value)}
+                 onKeyDown={e => e.key === 'Enter' && submit()}
+                 style={{width: '100%', marginBottom: 16}} />
+          <button className="btn-primary" onClick={submit} disabled={busy}
+                  style={{width: '100%'}}>
+            {busy ? '…' : 'Mettre à jour'}
           </button>
-        ))}
-      </aside>
-
-      <div className="create-card wiki-content" style={{padding: '20px 28px', lineHeight: 1.6, color: 'var(--text-secondary)', maxWidth: 900}}>
-        {locale !== 'en' && (
-          <div style={{padding: '10px 14px', marginBottom: 18, background: 'var(--bg-elevated)', borderLeft: '3px solid var(--accent)', borderRadius: 4, fontSize: 12, color: 'var(--text-muted)'}}>
-            {t('wiki.notice')}
-          </div>
-        )}
-        <section id="wiki-intro" style={{marginBottom: 32}}>
-          <h2 style={{color: 'var(--text-primary)'}}>AIDocGen — User Wiki</h2>
-          <p>
-            AIDocGen turns a research question into a fully verified technical report.
-            A local Ollama ensemble plans, searches the web, extracts claims, fact-checks
-            them against sources, then writes a cited Markdown/PDF dossier.
-          </p>
-          <p>
-            The app also includes a <strong>PDF → Markdown</strong> pipeline optimized for
-            ingestion into Dify knowledge bases.
-          </p>
-        </section>
-
-        <section id="wiki-login" style={{marginBottom: 32}}>
-          <h3 style={{color: 'var(--text-primary)'}}>2. Login &amp; users</h3>
-          <p>
-            Log in with the credentials your administrator gave you. Every user has their
-            own private workspace: you can only see and act on the dossiers and PDF
-            conversions you created. Admins can see everything and manage users.
-          </p>
-          <p>Default admin: <code>admin / admin</code> — change it in the Users tab.</p>
-        </section>
-
-        <section id="wiki-dossier" style={{marginBottom: 32}}>
-          <h3 style={{color: 'var(--text-primary)'}}>3. Generating a dossier</h3>
-          <ol>
-            <li>Open the <strong>Dashboard</strong> tab.</li>
-            <li>Type a <em>research topic</em> (a full sentence works best).</li>
-            <li>Optionally add comma-separated <em>tags</em> to focus the search (e.g. <code>IMX8MP, DSP, HiFi4</code>).</li>
-            <li>Pick the server, models, language, detail level.</li>
-            <li>Click <strong>Generer</strong>.</li>
-            <li>When the run reaches the <code>awaiting_validation</code> stage, open the plan editor to review/edit the outline, then click <strong>Lancer</strong>.</li>
-          </ol>
-        </section>
-
-        <section id="wiki-fields" style={{marginBottom: 32}}>
-          <h3 style={{color: 'var(--text-primary)'}}>4. Form fields explained</h3>
-          <table style={{width: '100%', borderCollapse: 'collapse', fontSize: 13}}>
-            <thead>
-              <tr style={{borderBottom: '1px solid var(--border)'}}>
-                <th style={{textAlign: 'left', padding: 8}}>Field</th>
-                <th style={{textAlign: 'left', padding: 8}}>Purpose</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr style={{borderBottom: '1px solid var(--border)'}}><td style={{padding: 8}}><strong>Topic</strong></td><td style={{padding: 8}}>Research question sent to the planner. Be specific.</td></tr>
-              <tr style={{borderBottom: '1px solid var(--border)'}}><td style={{padding: 8}}><strong>Tags</strong></td><td style={{padding: 8}}>Keywords appended to web search and used to filter irrelevant content.</td></tr>
-              <tr style={{borderBottom: '1px solid var(--border)'}}><td style={{padding: 8}}><strong>Server</strong></td><td style={{padding: 8}}>Ollama endpoint that serves the models. Cloud = Ollama Cloud.</td></tr>
-              <tr style={{borderBottom: '1px solid var(--border)'}}><td style={{padding: 8}}><strong>Planner</strong></td><td style={{padding: 8}}>Model that designs the table of contents and sub-questions.</td></tr>
-              <tr style={{borderBottom: '1px solid var(--border)'}}><td style={{padding: 8}}><strong>Writer</strong></td><td style={{padding: 8}}>Model that drafts each section from verified claims.</td></tr>
-              <tr style={{borderBottom: '1px solid var(--border)'}}><td style={{padding: 8}}><strong>Judge</strong></td><td style={{padding: 8}}>Model that accepts/rejects claims against the corpus.</td></tr>
-              <tr style={{borderBottom: '1px solid var(--border)'}}><td style={{padding: 8}}><strong>Extract</strong></td><td style={{padding: 8}}>Model that extracts atomic claims from each source.</td></tr>
-              <tr style={{borderBottom: '1px solid var(--border)'}}><td style={{padding: 8}}><strong>Coder</strong></td><td style={{padding: 8}}>Model used for JSON-structured outputs (planner schema).</td></tr>
-              <tr style={{borderBottom: '1px solid var(--border)'}}><td style={{padding: 8}}><strong>Language</strong></td><td style={{padding: 8}}>Output language for the report (FR / EN / RU).</td></tr>
-              <tr style={{borderBottom: '1px solid var(--border)'}}><td style={{padding: 8}}><strong>Prompt type</strong></td><td style={{padding: 8}}>Planner template (generic / scientific / book-style…).</td></tr>
-              <tr><td style={{padding: 8}}><strong>Detail level</strong></td><td style={{padding: 8}}>Synthese (short) / Standard / Dissertation (long).</td></tr>
-            </tbody>
-          </table>
-        </section>
-
-        <section id="wiki-plan" style={{marginBottom: 32}}>
-          <h3 style={{color: 'var(--text-primary)'}}>5. Reviewing the plan</h3>
-          <p>
-            When a run pauses at <code>awaiting_validation</code>, press the <strong>Plan</strong> button.
-            You can rename parts, add/remove chapters and sections, save, and finally
-            <strong> Lancer</strong> to resume the pipeline with your edited plan.
-          </p>
-        </section>
-
-        <section id="wiki-runs" style={{marginBottom: 32}}>
-          <h3 style={{color: 'var(--text-primary)'}}>6. Run list &amp; actions</h3>
-          <ul>
-            <li><strong>Reset</strong> — restart the run from scratch.</li>
-            <li><strong>Resume</strong> — continue an interrupted or failed run.</li>
-            <li><strong>Stop</strong> — cancel a running job.</li>
-            <li><strong>MD / PDF</strong> — download the final report.</li>
-            <li><strong>WP</strong> — publish the report as a WordPress draft.</li>
-            <li><strong>Dify</strong> — push the verified content to a Dify knowledge base.</li>
-            <li><strong>x</strong> — delete the run and its artifacts.</li>
-          </ul>
-          <p>Click a row to open the <em>Run detail</em> panel with models, sources, claims, coherence, timeline and LLM stats.</p>
-        </section>
-
-        <section id="wiki-report" style={{marginBottom: 32}}>
-          <h3 style={{color: 'var(--text-primary)'}}>7. Reading the report</h3>
-          <ul>
-            <li><strong>Reliability grade</strong> — A–F score based on accepted vs rejected vs uncertain claims.</li>
-            <li><strong>Sources</strong> — full list of URLs visited during the run.</li>
-            <li><strong>Claims</strong> — every extracted statement with its verdict and justification.</li>
-            <li><strong>Coherence</strong> — contradictions and confirmations between sources.</li>
-          </ul>
-        </section>
-
-        <section id="wiki-pdf" style={{marginBottom: 32}}>
-          <h3 style={{color: 'var(--text-primary)'}}>8. PDF → Markdown (Dify)</h3>
-          <p>Open the <strong>Tools</strong> tab → <strong>PDF → Markdown</strong> sub-tab. Three modes:</p>
-          <ul>
-            <li><strong>Simple</strong> — short text PDFs (&lt; ~20 pages). One LLM call.</li>
-            <li><strong>Huge</strong> — long text PDFs (&gt; 40 KB extracted). Parallel chunk cleanup.</li>
-            <li><strong>Vision</strong> — scanned docs or app screenshots. Each page is transcribed by a vision model.</li>
-          </ul>
-          <p>Upload the PDF, pick the mode/model, press <strong>Convertir</strong>. When the job shows <code>completed</code>, press <strong>MD</strong> to download.</p>
-          <p>Max upload size: 500 MB.</p>
-        </section>
-
-        <section id="wiki-video" style={{marginBottom: 32}}>
-          <h3 style={{color: 'var(--text-primary)'}}>9. Vidéo → Markdown</h3>
-          <p>Open the <strong>Tools</strong> tab → <strong>Vidéo → Markdown</strong> sub-tab. The video is split into chunks of N seconds; each chunk is sent to a local omnimodal LLM (default <code>nemotron3:33b</code>) which transcribes the audio and describes what is visible.</p>
-          <p><strong>Modes</strong>:</p>
-          <ul>
-            <li><strong>Vision</strong> — one frame per chunk described, no audio. Use for silent footage.</li>
-            <li><strong>Audio</strong> — transcribe speech only.</li>
-            <li><strong>Full</strong> (default) — transcript + scene description per chunk.</li>
-          </ul>
-          <p><strong>Form fields</strong>:</p>
-          <ul>
-            <li><strong>Chunk (s)</strong> — chunk duration. Shorter = finer timestamps, more API calls. Default 30 s.</li>
-            <li><strong>Overlap (s)</strong> — extra audio context added before each chunk so words spoken across boundaries aren't lost. Default 1.5 s. Side effect: a few words may appear twice in adjacent chunks.</li>
-            <li><strong>Parallel</strong> — concurrent API calls. Keep at 1–2 for local GPU.</li>
-            <li><strong>Synthèse cohérente</strong> (checkbox, default on) — once the raw transcript is done, automatically run a coherent rewrite via a strong cloud model (default <code>deepseek-v4-pro</code>). The raw .md is kept untouched; you get two downloadable files.</li>
-          </ul>
-          <p><strong>Output</strong>: a Markdown file with <code>## [HH:MM:SS]</code> headers per chunk. The raw output is verbatim per-chunk (no risk of dilution since the LLM never sees the whole video at once). The optional synthesis is a clean, coherent rewrite of the same content.</p>
-          <p><strong>Resume</strong>: each chunk is written to disk as soon as the LLM responds. If the job is cancelled, the server restarts, or it fails mid-way, click <strong>Resume</strong> on the row — the script skips chunks already on disk and continues. Progress (X/Y chunks · pct) is shown live with a progress bar.</p>
-          <p><strong>On-demand synthesis</strong>: if you didn't tick the box, or want to regenerate with a different model, click <strong>Faire synthèse</strong> on a completed job.</p>
-          <p>Max upload size: 5 GB.</p>
-        </section>
-
-        <section id="wiki-audio" style={{marginBottom: 32}}>
-          <h3 style={{color: 'var(--text-primary)'}}>10. Audio → Markdown</h3>
-          <p>Open the <strong>Tools</strong> tab → <strong>Audio → Markdown</strong> sub-tab. Same pipeline as video, with no visual mode (uses <code>nemotron3:33b</code> in audio-only mode).</p>
-          <p>Supported extensions: mp3, wav, m4a, ogg, flac, opus, aac, wma, webm. Recommended chunk length: <strong>60 s</strong> (longer than video since there's no per-second visual detail to capture).</p>
-          <p>Same features as video: incremental writes, <strong>Resume</strong> after interrupt, live progress bar, <strong>Overlap</strong> for boundary safety, optional <strong>Synthèse cohérente</strong> via Ollama Cloud.</p>
-        </section>
-
-        <section id="wiki-prefs" style={{marginBottom: 32}}>
-          <h3 style={{color: 'var(--text-primary)'}}>11. Preferences</h3>
-          <p>Your selections in the dashboard form (planner, writer, judge, extract, coder, language, prompt type, detail level, server) are automatically saved to your account as you change them (debounced 0.6 s). Next login, the form is pre-filled the way you left it.</p>
-          <p>New accounts start with the global defaults set by the administrator in <code>ensemble-proxy.env</code> — currently <code>glm-5</code> (planner/judge), <code>qwen3.5:397b</code> (writer/extract), <code>qwen3-coder:480b</code> (coder).</p>
-        </section>
-
-        <section id="wiki-admin" style={{marginBottom: 32}}>
-          <h3 style={{color: 'var(--text-primary)'}}>12. Admin: users</h3>
-          <p>Only admins see the <strong>Users</strong> tab. From there you can:</p>
-          <ul>
-            <li>Create a new account (<code>user</code> or <code>admin</code>).</li>
-            <li>Change any user's password.</li>
-            <li>Delete any account except your own.</li>
-          </ul>
-          <p>All regular users can only see and act on their own runs and PDF jobs.</p>
-        </section>
-
-        <section id="wiki-troubleshoot" style={{marginBottom: 32}}>
-          <h3 style={{color: 'var(--text-primary)'}}>13. Troubleshooting</h3>
-          <ul>
-            <li><strong>Upload fails with large PDF</strong> — nginx body limit, contact admin.</li>
-            <li><strong>Run stuck in &quot;running&quot; after server restart</strong> — press <strong>Resume</strong>.</li>
-            <li><strong>Empty model dropdown</strong> — the selected server is unreachable, switch to another one.</li>
-            <li><strong>Failed Dify push</strong> — check <code>DIFY_EMAIL</code> / <code>DIFY_PASSWORD</code> or the Dataset API key in <code>ensemble-proxy.env</code>.</li>
-            <li><strong>Access denied on a run</strong> — you are not the owner. Ask the creator or an admin.</li>
-          </ul>
-        </section>
+        </div>
       </div>
     </div>
   );
@@ -2148,7 +2040,7 @@ export default function App() {
   const [detailId, setDetailId] = useState<string|null>(null);
   const [editId, setEditId] = useState<string|null>(null);
   const [audiobookFor, setAudiobookFor] = useState<{id: string; title: string}|null>(null);
-  const [me, setMe] = useState<{ username: string; role: string } | null>(null);
+  const [me, setMe] = useState<{ username: string; role: string; must_change_password?: boolean } | null>(null);
   const [prefsLoaded, setPrefsLoaded] = useState(false);
 
   if (token) axios.defaults.headers.common['Authorization'] = `Bearer ${token}`;
@@ -2282,6 +2174,7 @@ export default function App() {
           )}
         </nav>
         <div style={{marginTop:'auto', display:'flex', flexDirection:'column', gap:6, alignItems:'center'}}>
+          <ThemeToggle />
           <LangPicker />
           <button className="nav-item" onClick={()=>{localStorage.clear();window.location.reload();}} title={t('nav.logout')}><NavIcon type="logout" /></button>
         </div>
@@ -2335,6 +2228,10 @@ export default function App() {
 
           {/* ── RUN LIST ── */}
           <div className="run-grid">
+            {runs.length === 0 && (
+              <EmptyState icon="🔍" title="Aucune recherche en cours."
+                          hint="Saisis ton sujet, choisis tes modèles et clique « Générer » — le pipeline va planifier, chercher, vérifier et rédiger." />
+            )}
             {runs.map(run => {
               const pct = progress(run);
               const pLabel = progressLabel(run);
@@ -2375,12 +2272,13 @@ export default function App() {
               );
             })}
           </div>
-        </>) : view === 'tools' ? <Tools servers={srv} srvIdx={sIdx} /> : view === 'wiki' ? <Wiki /> : view === 'users' ? (me?.role === 'admin' ? <UserManager /> : <div className="info-card">{t('common.access_denied')}</div>) : <ModelManager />}
+        </>) : view === 'tools' ? <Tools servers={srv} srvIdx={sIdx} /> : view === 'wiki' ? <Suspense fallback={<div style={{padding:40,textAlign:'center',color:'var(--text-muted)'}}>{t('common.loading')}</div>}><Wiki /></Suspense> : view === 'users' ? (me?.role === 'admin' ? <UserManager /> : <div className="info-card">{t('common.access_denied')}</div>) : <ModelManager />}
       </main>
 
       {detailId && <RunDetailPanel runId={detailId} onClose={()=>setDetailId(null)} />}
       {editId && <VisualPlanEditor runId={editId} onClose={()=>setEditId(null)} onApproved={()=>setEditId(null)} />}
       {audiobookFor && <AudiobookLaunchModal runId={audiobookFor.id} runTitle={audiobookFor.title} onClose={()=>setAudiobookFor(null)} />}
+      {me?.must_change_password && <ForcePasswordChange onDone={() => setMe({...me, must_change_password: false})} />}
     </div>
   );
 }

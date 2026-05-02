@@ -2,7 +2,8 @@
    AIDocGen – Modern Dark UI
    ═══════════════════════════════════════════ */
 
-:root {
+:root,
+:root[data-theme="dark"] {
   --bg-base: #0b0f1a;
   --bg-surface: #111827;
   --bg-elevated: #1a2236;
@@ -34,6 +35,36 @@
   --shadow: 0 4px 24px rgba(0, 0, 0, 0.3);
   --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.2);
   --transition: 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+:root[data-theme="light"] {
+  --bg-base: #f8fafc;
+  --bg-surface: #ffffff;
+  --bg-elevated: #f1f5f9;
+  --bg-hover: #e2e8f0;
+  --bg-input: #ffffff;
+
+  --accent: #4f46e5;
+  --accent-hover: #6366f1;
+  --accent-muted: rgba(79, 70, 229, 0.10);
+  --accent-glow: rgba(79, 70, 229, 0.20);
+
+  --text-primary: #0f172a;
+  --text-secondary: #475569;
+  --text-muted: #94a3b8;
+
+  --border: rgba(15, 23, 42, 0.08);
+  --border-accent: rgba(79, 70, 229, 0.30);
+
+  --success: #16a34a;
+  --success-bg: rgba(22, 163, 74, 0.10);
+  --warning: #d97706;
+  --warning-bg: rgba(217, 119, 6, 0.10);
+  --error: #dc2626;
+  --error-bg: rgba(220, 38, 38, 0.10);
+
+  --shadow: 0 4px 24px rgba(15, 23, 42, 0.08);
+  --shadow-sm: 0 2px 8px rgba(15, 23, 42, 0.06);
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
