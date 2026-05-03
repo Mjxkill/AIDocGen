@@ -2704,25 +2704,47 @@ async def _run_audiobook_job(job_id: str, md_path: Path, out_dir: Path, basename
             tail = log_path.read_text()[-2000:] if log_path.exists() else ""
             await _u(state="failed", stage="failed", error=f"exit={rc}", log_tail=tail)
             return
-        m4b_path = out_dir / f"{basename}.m4b"
-        zip_path = out_dir / f"{basename}.zip"
-        if not m4b_path.exists():
-            await _u(state="failed", stage="failed", error="m4b not produced")
-            return
-        # Compute total duration from M4B
-        r = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-             "-of", "default=noprint_wrappers=1:nokey=1", str(m4b_path)],
-            check=True, capture_output=True, text=True,
-        )
-        duration = float(r.stdout.strip() or 0)
-        # Count chapters
         chapters_dir = out_dir / "chapters"
-        n_chapters = sum(1 for _ in chapters_dir.glob("*.mp3")) if chapters_dir.exists() else 0
+        if not chapters_dir.exists() or not any(chapters_dir.glob("*.mp3")):
+            await _u(state="failed", stage="failed",
+                     error="no chapter mp3s produced")
+            return
+        # ---- Build EPUB3s from chapters + planner.json ----
+        await _u(stage="packaging_epubs")
+        epub_cmd = ["python3", "-u", str(SCRIPTS_DIR / "build_epub3.py"),
+                    str(out_dir)]
+        # Resolve planner if this audiobook was built from a dossier run
+        if (st.get("source_kind") == "run") and st.get("source_run_id"):
+            planner = (BASE_DIR / "data" / "dossiers"
+                       / st["source_run_id"] / "planner.json")
+            if planner.exists():
+                epub_cmd.append(str(planner))
+        with log_path.open("a") as logf:
+            logf.write(f"\n--- BUILD_EPUB3 @ {int(time.time())} ---\n")
+            logf.write(f"$ {' '.join(epub_cmd)}\n")
+            logf.flush()
+            ep_proc = await asyncio.create_subprocess_exec(
+                *epub_cmd, stdout=logf, stderr=asyncio.subprocess.STDOUT,
+            )
+            ep_rc = await ep_proc.wait()
+        if ep_rc != 0:
+            tail = log_path.read_text()[-2000:] if log_path.exists() else ""
+            await _u(state="failed", stage="failed",
+                     error=f"epub3 build failed (exit={ep_rc})",
+                     log_tail=tail)
+            return
+        # Re-read status (build_epub3 wrote epubs/epubs_zip into it)
+        cur = _read_audiobook_status(job_id) or {}
+        n_chapters = sum(1 for _ in chapters_dir.glob("*.mp3"))
+        duration = sum(
+            float(subprocess.run(
+                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                 "-of", "default=noprint_wrappers=1:nokey=1", str(p)],
+                capture_output=True, text=True,
+            ).stdout.strip() or 0)
+            for p in sorted(chapters_dir.glob("*.mp3"))
+        )
         await _u(state="completed", stage="completed",
-                 m4b_name=m4b_path.name, m4b_size=m4b_path.stat().st_size,
-                 zip_name=zip_path.name if zip_path.exists() else None,
-                 zip_size=zip_path.stat().st_size if zip_path.exists() else None,
                  chapters_count=n_chapters,
                  duration_seconds=round(duration, 1))
     except asyncio.CancelledError:
@@ -3019,29 +3041,67 @@ async def audiobook_job_resume(job_id: str, user: dict = Depends(get_current_use
 
 @app.post("/v1/audiobook/jobs/{job_id}/download-url")
 async def audiobook_download_url(job_id: str, type: str = "m4b",
+                                  name: Optional[str] = None,
                                   user: dict = Depends(get_current_user)):
-    """Issue a 10-min signed URL so the browser can download the file
-    natively (with progress bar, pause/resume, system download manager)."""
+    """Issue a 10-min signed URL for a native browser download.
+    type: m4b | zip | summary | epub | epubs_zip
+    For type=epub, `name` must be the filename of one of the EPUB3 files
+    listed in status.epubs."""
     _check_audiobook_access(job_id, user)
-    if type not in ("m4b", "zip", "summary"):
-        raise HTTPException(400, "type must be m4b|zip|summary")
-    scope = f"audiobook:{job_id}:{type}"
+    data = _read_audiobook_status(job_id) or {}
+    if type == "epub":
+        if not name:
+            raise HTTPException(400, "name= required for type=epub")
+        epubs = data.get("epubs") or []
+        if not any(e.get("name") == name for e in epubs):
+            raise HTTPException(404, f"epub {name!r} not in this job")
+        scope = f"audiobook:{job_id}:epub:{name}"
+        url = (f"/v1/audiobook/jobs/{job_id}/download?type=epub&"
+               f"name={name}&token=")
+    elif type == "epubs_zip":
+        scope = f"audiobook:{job_id}:epubs_zip"
+        url = f"/v1/audiobook/jobs/{job_id}/download?type=epubs_zip&token="
+    elif type in ("m4b", "zip", "summary"):
+        scope = f"audiobook:{job_id}:{type}"
+        url = f"/v1/audiobook/jobs/{job_id}/download?type={type}&token="
+    else:
+        raise HTTPException(400, "type must be m4b|zip|summary|epub|epubs_zip")
     tok = create_download_token(user["id"], scope, expires_in=600)
-    return {"url": f"/v1/audiobook/jobs/{job_id}/download?type={type}&token={tok}",
-            "expires_in": 600}
+    return {"url": url + tok, "expires_in": 600}
 
 
 @app.get("/v1/audiobook/jobs/{job_id}/download")
 async def audiobook_job_download(request: Request, job_id: str, type: str = "m4b",
+                                 name: Optional[str] = None,
                                  token: Optional[str] = None):
-    user = _check_download_auth(request, token, f"audiobook:{job_id}:{type}")
+    if type == "epub":
+        if not name:
+            raise HTTPException(400, "name= required for type=epub")
+        scope = f"audiobook:{job_id}:epub:{name}"
+    elif type == "epubs_zip":
+        scope = f"audiobook:{job_id}:epubs_zip"
+    else:
+        scope = f"audiobook:{job_id}:{type}"
+    user = _check_download_auth(request, token, scope)
     _check_audiobook_access(job_id, user)
     data = _read_audiobook_status(job_id) or {}
     job_dir = AUDIOBOOK_JOBS_DIR / job_id
-    if type == "zip":
-        name = data.get("zip_name")
-        if not name: raise HTTPException(404, "zip not ready")
-        p = job_dir / name
+    if type == "epub":
+        epubs = data.get("epubs") or []
+        if not any(e.get("name") == name for e in epubs):
+            raise HTTPException(404, f"epub {name!r} not in this job")
+        p = job_dir / "epub3" / name
+        media = "application/epub+zip"
+    elif type == "epubs_zip":
+        zname = data.get("epubs_zip_name")
+        if not zname:
+            raise HTTPException(404, "epubs zip not ready")
+        p = job_dir / zname
+        media = "application/zip"
+    elif type == "zip":
+        zname = data.get("zip_name")
+        if not zname: raise HTTPException(404, "zip not ready")
+        p = job_dir / zname
         media = "application/zip"
     elif type == "summary":
         p = job_dir / "summary.md"
@@ -3049,9 +3109,9 @@ async def audiobook_job_download(request: Request, job_id: str, type: str = "m4b
             raise HTTPException(404, "summary not available")
         media = "text/markdown"
     else:  # m4b
-        name = data.get("m4b_name")
-        if not name: raise HTTPException(404, "m4b not ready")
-        p = job_dir / name
+        m4b_name = data.get("m4b_name")
+        if not m4b_name: raise HTTPException(404, "m4b not ready")
+        p = job_dir / m4b_name
         media = "audio/mp4"
     if not p.exists():
         raise HTTPException(404, "output not ready")

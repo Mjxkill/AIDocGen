@@ -871,23 +871,12 @@ def main():
         dur = ffprobe_duration(ch_mp3)
         chapter_files.append((title, ch_mp3, dur))
 
-    # Build M4B
-    update_progress(state, total_chunks, started, args.voice, "muxing")
-    m4b = out_dir / f"{args.basename}.m4b"
-    print(f"[m4b] muxing {len(chapter_files)} chapters into {m4b}", flush=True)
-    make_m4b(chapter_files, m4b, args.basename)
-
-    # Build ZIP (per-chapter mp3 + m4b)
-    zip_path = out_dir / f"{args.basename}.zip"
-    print(f"[zip] {zip_path}", flush=True)
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_STORED) as z:
-        z.write(m4b, arcname=m4b.name)
-        for _, p, _ in chapter_files:
-            z.write(p, arcname=f"chapters/{p.name}")
-
+    # Per-chapter MP3s are now in chapters_dir; the EPUB3 builder is invoked
+    # by the orchestrator (app.py) after this script finishes.
     total_dur = sum(d for _, _, d in chapter_files)
-    print(f"DONE → {m4b.name} + {zip_path.name} "
-          f"({len(chapter_files)} chapters, {int(total_dur)}s total)", flush=True)
+    update_progress(state, total_chunks, started, args.voice, "synthesized")
+    print(f"DONE → {len(chapter_files)} chapter mp3s in {chapters_dir} "
+          f"({int(total_dur)}s total)", flush=True)
 
 
 if __name__ == "__main__":

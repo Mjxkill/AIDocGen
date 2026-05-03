@@ -1453,6 +1453,8 @@ interface AudiobookJob {
   input_size?: number;
   m4b_name?: string; m4b_size?: number;
   zip_name?: string; zip_size?: number;
+  epubs?: { name: string; size: number; title: string }[];
+  epubs_zip_name?: string; epubs_zip_size?: number;
   chapters_count?: number;
   duration_seconds?: number;
   progress?: { done: number; total: number; pct: number };
@@ -1541,8 +1543,14 @@ const AudiobookTools = () => {
     }
   };
 
-  const download = (job: AudiobookJob, type: 'm4b' | 'zip' | 'summary' = 'm4b') => {
+  const download = (job: AudiobookJob,
+                    type: 'm4b' | 'zip' | 'summary' | 'epubs_zip' = 'm4b') => {
     nativeDownload(`/v1/audiobook/jobs/${job.job_id}/download-url?type=${type}`);
+  };
+  const downloadEpub = (job: AudiobookJob, name: string) => {
+    nativeDownload(
+      `/v1/audiobook/jobs/${job.job_id}/download-url?type=epub&name=${encodeURIComponent(name)}`
+    );
   };
 
   const stateColor = (s: string) => ({
@@ -1667,7 +1675,9 @@ const AudiobookTools = () => {
               <div className="status-cell">
                 <span className="badge" style={{background: stateColor(job.state), color: '#fff'}}>{t(`state.${job.state}`)}</span>
                 <div style={{fontSize: 10, color: 'var(--text-muted)', marginTop: 4}}>
-                  {fmtSize(job.input_size)} → M4B {fmtSize(job.m4b_size)}
+                  {fmtSize(job.input_size)} → {job.epubs && job.epubs.length > 0
+                    ? `${job.epubs.length} EPUB3 (${fmtSize(job.epubs_zip_size || job.epubs.reduce((a, e) => a + (e.size || 0), 0))})`
+                    : `M4B ${fmtSize(job.m4b_size)}`}
                 </div>
                 {job.error && <div style={{fontSize: 10, color: 'var(--error)', marginTop: 4, maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis'}}>{job.error}</div>}
               </div>
@@ -1683,11 +1693,34 @@ const AudiobookTools = () => {
                     </div>
                   </>
                 )}
-                <div className="action-bar">
+                <div className="action-bar" style={{flexWrap: 'wrap'}}>
                   {job.state === 'completed' && (
                     <>
-                      <button className="btn-sm btn-primary" title="Single audiobook file with chapter markers" onClick={() => download(job, 'm4b')}>M4B</button>
-                      <button className="btn-sm btn-outline" title="ZIP with one MP3 per chapter + the M4B" onClick={() => download(job, 'zip')}>ZIP</button>
+                      {job.epubs && job.epubs.length > 0 ? (
+                        <>
+                          {job.epubs.map((e, k) => (
+                            <button key={e.name}
+                                    className="btn-sm btn-primary"
+                                    title={`${e.title} (${fmtSize(e.size)}) — EPUB3 with text + audio + SMIL sync`}
+                                    onClick={() => downloadEpub(job, e.name)}>
+                              📖 {k + 1}. {e.title.length > 32 ? e.title.slice(0, 30) + '…' : e.title}
+                            </button>
+                          ))}
+                          {job.epubs_zip_name && (
+                            <button className="btn-sm btn-outline"
+                                    title={`All ${job.epubs.length} EPUB3 in one ZIP (${fmtSize(job.epubs_zip_size)})`}
+                                    onClick={() => download(job, 'epubs_zip')}>
+                              📦 ZIP all
+                            </button>
+                          )}
+                        </>
+                      ) : (
+                        // Legacy job (M4B-era, before EPUB3 pipeline)
+                        <>
+                          {job.m4b_name && <button className="btn-sm btn-primary" title="Single audiobook file with chapter markers" onClick={() => download(job, 'm4b')}>M4B</button>}
+                          {job.zip_name && <button className="btn-sm btn-outline" title="ZIP with one MP3 per chapter + the M4B" onClick={() => download(job, 'zip')}>ZIP</button>}
+                        </>
+                      )}
                       {job.summarize && (
                         <button className="btn-sm btn-outline" title="Download the LLM summary used to build this audiobook" onClick={() => download(job, 'summary')}>Résumé MD</button>
                       )}
