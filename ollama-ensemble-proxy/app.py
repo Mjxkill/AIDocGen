@@ -25,7 +25,7 @@ from pydantic import BaseModel, ConfigDict
 
 from core.config import DossierConfig
 from core.engine import DossierEngine
-from core.auth import get_current_user, get_admin_user, create_access_token, verify_password, get_password_hash, _get_users, _save_users, ACCESS_TOKEN_EXPIRE_MINUTES
+from core.auth import get_current_user, get_admin_user, create_access_token, verify_password, get_password_hash, _get_users, _save_users, ACCESS_TOKEN_EXPIRE_MINUTES, create_download_token, verify_download_token
 from core.logging_config import configure_logging, get_logger
 from core import audit, cost, notify
 
@@ -483,6 +483,39 @@ async def test_notification(request: Request, current_user: dict = Depends(get_c
     return result
 
 
+# --- DOWNLOAD AUTH (Bearer header OR ?token= query) ---
+def _check_download_auth(request: Request, token: str | None, scope: str) -> dict:
+    """Authenticate a download request via either a short-lived signed token
+    in the URL (so native browser downloads work — `<a href>` cannot carry
+    Authorization headers) OR the standard Bearer header."""
+    if token:
+        user_id = verify_download_token(token, scope)
+        if not user_id:
+            raise HTTPException(401, "invalid or expired download token")
+        u = _user_by_id(user_id)
+        if not u:
+            raise HTTPException(401, "user not found")
+        return u
+    # Fallback: Bearer header
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="auth required",
+                            headers={"WWW-Authenticate": "Bearer"})
+    try:
+        from core.auth import SECRET_KEY, ALGORITHM
+        from jose import jwt as _jwt
+        payload = _jwt.decode(auth[7:], SECRET_KEY, algorithms=[ALGORITHM])
+        username = payload.get("sub")
+        if not username:
+            raise HTTPException(401, "invalid token")
+    except Exception:
+        raise HTTPException(401, "invalid token")
+    u = next((x for x in _get_users() if x["username"] == username), None)
+    if not u:
+        raise HTTPException(401, "user not found")
+    return u
+
+
 # --- JOB → NOTIFICATION GLUE ---
 def _read_dossier_status(run_id: str) -> dict | None:
     p = DATA_DIR / run_id / "status.json"
@@ -894,15 +927,36 @@ async def approve_run(run_id: str, user: dict = Depends(get_current_user)):
                    status_reader=_read_dossier_status)
     return {"status": "ok"}
 
+@app.post("/v1/dossier/runs/{run_id}/report/pdf-url")
+async def dossier_pdf_url(run_id: str, user: dict = Depends(get_current_user)):
+    _check_run_access(run_id, user)
+    scope = f"dossier:{run_id}:pdf"
+    tok = create_download_token(user["id"], scope, expires_in=600)
+    return {"url": f"/v1/dossier/runs/{run_id}/report/pdf?token={tok}",
+            "expires_in": 600}
+
+
+@app.post("/v1/dossier/runs/{run_id}/report/md-url")
+async def dossier_md_url(run_id: str, user: dict = Depends(get_current_user)):
+    _check_run_access(run_id, user)
+    scope = f"dossier:{run_id}:md"
+    tok = create_download_token(user["id"], scope, expires_in=600)
+    return {"url": f"/v1/dossier/runs/{run_id}/report/download?token={tok}",
+            "expires_in": 600}
+
+
 @app.get("/v1/dossier/runs/{run_id}/report/pdf")
-async def download_pdf(run_id: str, user: dict = Depends(get_current_user)):
+async def download_pdf(request: Request, run_id: str, token: Optional[str] = None):
+    user = _check_download_auth(request, token, f"dossier:{run_id}:pdf")
     _check_run_access(run_id, user)
     path = DATA_DIR / run_id / "report.pdf"
     if path.exists(): return FileResponse(path, filename=f"rapport_{run_id}.pdf")
     raise HTTPException(404)
 
+
 @app.get("/v1/dossier/runs/{run_id}/report/download")
-async def download_md(run_id: str, user: dict = Depends(get_current_user)):
+async def download_md(request: Request, run_id: str, token: Optional[str] = None):
+    user = _check_download_auth(request, token, f"dossier:{run_id}:md")
     _check_run_access(run_id, user)
     path = DATA_DIR / run_id / "report.md"
     if path.exists(): return FileResponse(path, filename=f"rapport_{run_id}.md")
@@ -1251,8 +1305,19 @@ async def pdf_job_status(job_id: str, user: dict = Depends(get_current_user)):
         data["log_tail"] = tail
     return data
 
+@app.post("/v1/pdf/jobs/{job_id}/download-url")
+async def pdf_download_url(job_id: str, user: dict = Depends(get_current_user)):
+    _check_pdf_access(job_id, user)
+    scope = f"pdf:{job_id}:md"
+    tok = create_download_token(user["id"], scope, expires_in=600)
+    return {"url": f"/v1/pdf/jobs/{job_id}/download?token={tok}",
+            "expires_in": 600}
+
+
 @app.get("/v1/pdf/jobs/{job_id}/download")
-async def pdf_job_download(job_id: str, user: dict = Depends(get_current_user)):
+async def pdf_job_download(request: Request, job_id: str,
+                           token: Optional[str] = None):
+    user = _check_download_auth(request, token, f"pdf:{job_id}:md")
     _check_pdf_access(job_id, user)
     data = _read_pdf_status(job_id)
     if not data:
@@ -1577,9 +1642,22 @@ async def video_job_resume(job_id: str, user: dict = Depends(get_current_user)):
                    status_reader=_read_video_status)
     return {"status": "ok"}
 
+@app.post("/v1/video/jobs/{job_id}/download-url")
+async def video_download_url(job_id: str, type: str = "raw",
+                              user: dict = Depends(get_current_user)):
+    _check_video_access(job_id, user)
+    if type not in ("raw", "synthesis"):
+        raise HTTPException(400, "type must be raw|synthesis")
+    scope = f"video:{job_id}:{type}"
+    tok = create_download_token(user["id"], scope, expires_in=600)
+    return {"url": f"/v1/video/jobs/{job_id}/download?type={type}&token={tok}",
+            "expires_in": 600}
+
+
 @app.get("/v1/video/jobs/{job_id}/download")
-async def video_job_download(job_id: str, type: str = "raw",
-                             user: dict = Depends(get_current_user)):
+async def video_job_download(request: Request, job_id: str, type: str = "raw",
+                             token: Optional[str] = None):
+    user = _check_download_auth(request, token, f"video:{job_id}:{type}")
     _check_video_access(job_id, user)
     data = _read_video_status(job_id) or {}
     if type == "synthesis":
@@ -1884,9 +1962,22 @@ async def audio_job_resume(job_id: str, user: dict = Depends(get_current_user)):
                    status_reader=_read_audio_status)
     return {"status": "ok"}
 
+@app.post("/v1/audio/jobs/{job_id}/download-url")
+async def audio_download_url(job_id: str, type: str = "raw",
+                              user: dict = Depends(get_current_user)):
+    _check_audio_access(job_id, user)
+    if type not in ("raw", "synthesis"):
+        raise HTTPException(400, "type must be raw|synthesis")
+    scope = f"audio:{job_id}:{type}"
+    tok = create_download_token(user["id"], scope, expires_in=600)
+    return {"url": f"/v1/audio/jobs/{job_id}/download?type={type}&token={tok}",
+            "expires_in": 600}
+
+
 @app.get("/v1/audio/jobs/{job_id}/download")
-async def audio_job_download(job_id: str, type: str = "raw",
-                             user: dict = Depends(get_current_user)):
+async def audio_job_download(request: Request, job_id: str, type: str = "raw",
+                             token: Optional[str] = None):
+    user = _check_download_auth(request, token, f"audio:{job_id}:{type}")
     _check_audio_access(job_id, user)
     data = _read_audio_status(job_id) or {}
     if type == "synthesis":
@@ -2172,8 +2263,19 @@ async def web_job_status(job_id: str, user: dict = Depends(get_current_user)):
         raise HTTPException(404)
     return data
 
+@app.post("/v1/web/jobs/{job_id}/download-url")
+async def web_download_url(job_id: str, user: dict = Depends(get_current_user)):
+    _check_web_access(job_id, user)
+    scope = f"web:{job_id}:out"
+    tok = create_download_token(user["id"], scope, expires_in=600)
+    return {"url": f"/v1/web/jobs/{job_id}/download?token={tok}",
+            "expires_in": 600}
+
+
 @app.get("/v1/web/jobs/{job_id}/download")
-async def web_job_download(job_id: str, user: dict = Depends(get_current_user)):
+async def web_job_download(request: Request, job_id: str,
+                           token: Optional[str] = None):
+    user = _check_download_auth(request, token, f"web:{job_id}:out")
     _check_web_access(job_id, user)
     data = _read_web_status(job_id) or {}
     out_name = data.get("output_name")
@@ -2915,9 +3017,24 @@ async def audiobook_job_resume(job_id: str, user: dict = Depends(get_current_use
                    status_reader=_read_audiobook_status)
     return {"status": "ok"}
 
+@app.post("/v1/audiobook/jobs/{job_id}/download-url")
+async def audiobook_download_url(job_id: str, type: str = "m4b",
+                                  user: dict = Depends(get_current_user)):
+    """Issue a 10-min signed URL so the browser can download the file
+    natively (with progress bar, pause/resume, system download manager)."""
+    _check_audiobook_access(job_id, user)
+    if type not in ("m4b", "zip", "summary"):
+        raise HTTPException(400, "type must be m4b|zip|summary")
+    scope = f"audiobook:{job_id}:{type}"
+    tok = create_download_token(user["id"], scope, expires_in=600)
+    return {"url": f"/v1/audiobook/jobs/{job_id}/download?type={type}&token={tok}",
+            "expires_in": 600}
+
+
 @app.get("/v1/audiobook/jobs/{job_id}/download")
-async def audiobook_job_download(job_id: str, type: str = "m4b",
-                                 user: dict = Depends(get_current_user)):
+async def audiobook_job_download(request: Request, job_id: str, type: str = "m4b",
+                                 token: Optional[str] = None):
+    user = _check_download_auth(request, token, f"audiobook:{job_id}:{type}")
     _check_audiobook_access(job_id, user)
     data = _read_audiobook_status(job_id) or {}
     job_dir = AUDIOBOOK_JOBS_DIR / job_id

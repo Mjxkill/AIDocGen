@@ -5,6 +5,27 @@ import { useT, LOCALES, type Locale } from './i18n';
 
 const Wiki = lazy(() => import('./pages/Wiki'));
 
+// ── Native browser download helper ──
+// Most file downloads require Bearer auth, but `<a href>` cannot carry an
+// Authorization header. We POST to a `*/download-url` endpoint that returns
+// a short-lived signed URL, then click an <a> pointing to it — the browser
+// then handles the download natively (progress bar, pause/resume, system
+// download manager, iOS Files integration).
+async function nativeDownload(urlEndpoint: string) {
+  try {
+    const r = await axios.post(urlEndpoint);
+    if (!r.data?.url) throw new Error('no url returned');
+    const a = document.createElement('a');
+    a.href = r.data.url;
+    a.rel = 'noopener noreferrer';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  } catch (e: any) {
+    alert('Download failed: ' + (e?.response?.data?.detail || e.message || 'unknown'));
+  }
+}
+
 // --- Types ---
 interface Metrics { cpu_percent: number; ram_percent: number; gpus: any[]; }
 interface RunStatus {
@@ -668,12 +689,7 @@ const PdfTools = ({ servers, srvIdx }: { servers: any[], srvIdx: number }) => {
   };
 
   const download = (job: PdfJob) => {
-    axios.get(`/v1/pdf/jobs/${job.job_id}/download`, { responseType: 'blob' }).then(r => {
-      const a = document.createElement('a');
-      a.href = window.URL.createObjectURL(new Blob([r.data]));
-      a.download = job.output_name || `${job.filename.replace(/\.pdf$/i, '')}.md`;
-      a.click();
-    });
+    nativeDownload(`/v1/pdf/jobs/${job.job_id}/download-url`);
   };
 
   const stateColor = (s: string) => ({
@@ -866,13 +882,7 @@ const VideoTools = () => {
   };
 
   const download = (job: VideoJob, type: 'raw' | 'synthesis' = 'raw') => {
-    axios.get(`/v1/video/jobs/${job.job_id}/download?type=${type}`, { responseType: 'blob' }).then(r => {
-      const a = document.createElement('a');
-      a.href = window.URL.createObjectURL(new Blob([r.data]));
-      const stem = job.filename.replace(/\.[^.]+$/, '');
-      a.download = type === 'synthesis' ? `${stem}_synthesis.md` : (job.output_name || `${stem}.md`);
-      a.click();
-    });
+    nativeDownload(`/v1/video/jobs/${job.job_id}/download-url?type=${type}`);
   };
 
   const triggerSynthesis = (job: VideoJob) => {
@@ -1088,13 +1098,7 @@ const AudioTools = () => {
   };
 
   const download = (job: AudioJob, type: 'raw' | 'synthesis' = 'raw') => {
-    axios.get(`/v1/audio/jobs/${job.job_id}/download?type=${type}`, { responseType: 'blob' }).then(r => {
-      const a = document.createElement('a');
-      a.href = window.URL.createObjectURL(new Blob([r.data]));
-      const stem = job.filename.replace(/\.[^.]+$/, '');
-      a.download = type === 'synthesis' ? `${stem}_synthesis.md` : (job.output_name || `${stem}.md`);
-      a.click();
-    });
+    nativeDownload(`/v1/audio/jobs/${job.job_id}/download-url?type=${type}`);
   };
 
   const triggerSynthesis = (job: AudioJob) => {
@@ -1300,12 +1304,7 @@ const WebTools = () => {
   };
 
   const download = (job: WebJob) => {
-    axios.get(`/v1/web/jobs/${job.job_id}/download`, { responseType: 'blob' }).then(r => {
-      const a = document.createElement('a');
-      a.href = window.URL.createObjectURL(new Blob([r.data]));
-      a.download = job.output_name || (job.kind === 'crawl' ? 'crawl.zip' : 'page.md');
-      a.click();
-    });
+    nativeDownload(`/v1/web/jobs/${job.job_id}/download-url`);
   };
 
   const stateColor = (s: string) => ({
@@ -1543,15 +1542,7 @@ const AudiobookTools = () => {
   };
 
   const download = (job: AudiobookJob, type: 'm4b' | 'zip' | 'summary' = 'm4b') => {
-    axios.get(`/v1/audiobook/jobs/${job.job_id}/download?type=${type}`,
-      { responseType: 'blob' }).then(r => {
-      const a = document.createElement('a');
-      a.href = window.URL.createObjectURL(new Blob([r.data]));
-      a.download = type === 'zip' ? (job.zip_name || `${job.basename || 'audiobook'}.zip`)
-        : type === 'summary' ? `${job.basename || 'summary'}_summary.md`
-        : (job.m4b_name || `${job.basename || 'audiobook'}.m4b`);
-      a.click();
-    });
+    nativeDownload(`/v1/audiobook/jobs/${job.job_id}/download-url?type=${type}`);
   };
 
   const stateColor = (s: string) => ({
@@ -2319,13 +2310,8 @@ export default function App() {
   };
 
   const dl = (runId: string, type: 'md'|'pdf') => {
-    const endpoint = type === 'pdf' ? 'pdf' : 'download';
-    axios.get(`/v1/dossier/runs/${runId}/report/${endpoint}`, {responseType:'blob'}).then(r => {
-      const a = document.createElement('a');
-      a.href = window.URL.createObjectURL(new Blob([r.data]));
-      a.download = `report_${runId}.${type}`;
-      a.click();
-    });
+    const endpoint = type === 'pdf' ? 'pdf-url' : 'md-url';
+    nativeDownload(`/v1/dossier/runs/${runId}/report/${endpoint}`);
   };
 
   return (

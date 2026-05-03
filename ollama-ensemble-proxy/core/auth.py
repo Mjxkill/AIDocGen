@@ -1,6 +1,9 @@
 import os
 import json
 import time
+import base64
+import hashlib
+import hmac
 from datetime import datetime, timedelta
 from typing import Optional
 from pathlib import Path
@@ -80,3 +83,46 @@ async def get_admin_user(current_user: dict = Depends(get_current_user)):
     if current_user.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Not enough permissions")
     return current_user
+
+
+# ── short-lived download tokens ──
+# Used to authenticate native browser downloads (where the Authorization
+# header cannot be set). Token = HMAC over (user_id|scope|exp) with the
+# JWT secret. Scope is a string the server picks per-resource (eg.
+# "audiobook:JOBID:m4b") so a token can only download one specific file.
+
+def create_download_token(user_id: str, scope: str, expires_in: int = 600) -> str:
+    """Returns a URL-safe token good for `expires_in` seconds, scoped to
+    one specific download. Embed in `?token=` query params."""
+    exp = int(time.time()) + max(60, int(expires_in))
+    payload = f"{user_id}|{scope}|{exp}"
+    sig = hmac.new(SECRET_KEY.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    raw = f"{payload}|{sig}".encode()
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+
+def verify_download_token(token: str, expected_scope: str) -> Optional[str]:
+    """Returns the user_id if the token is valid for the given scope,
+    else None. Constant-time signature compare."""
+    if not token:
+        return None
+    try:
+        pad = "=" * ((4 - len(token) % 4) % 4)
+        raw = base64.urlsafe_b64decode((token + pad).encode()).decode()
+        user_id, scope, exp_str, sig = raw.split("|", 3)
+    except Exception:
+        return None
+    if scope != expected_scope:
+        return None
+    try:
+        exp = int(exp_str)
+    except ValueError:
+        return None
+    if exp < int(time.time()):
+        return None
+    expected_sig = hmac.new(SECRET_KEY.encode(),
+                            f"{user_id}|{scope}|{exp}".encode(),
+                            hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(sig, expected_sig):
+        return None
+    return user_id
