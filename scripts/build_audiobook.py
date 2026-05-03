@@ -101,13 +101,59 @@ def chunk_text(text: str, target: int = 3000) -> list[str]:
 # TTS engines
 # ─────────────────────────────────────────────────────────────────────────────
 
-def tts_xtts(text: str, voice: str, speed: float, host: str,
-             language: str = "fr") -> bytes:
-    """Local XTTS-v2 server (Blackwell-compatible)."""
-    payload = {
-        "voice": voice, "input": text, "language": language,
-        "response_format": "mp3", "speed": speed,
-    }
+XTTS_MAX_CHARS = 800  # ~200 tokens; safely below XTTS's 400-token hard limit
+
+
+def _split_for_xtts(text: str, max_chars: int = XTTS_MAX_CHARS) -> list[str]:
+    """Sub-split text so each piece fits XTTS's 400-token cap.
+    Sentences first; if a sentence is still too long, fall back to
+    clause boundaries (`, ; :`) then to word boundaries."""
+    pieces = chunk_text(text, target=max_chars)
+    out: list[str] = []
+    for p in pieces:
+        if len(p) <= max_chars:
+            out.append(p)
+            continue
+        sub = re.split(r"(?<=[,;:])\s+", p)
+        cur, cur_len = [], 0
+        for s in sub:
+            if not s:
+                continue
+            if cur and cur_len + len(s) + 1 > max_chars:
+                out.append(" ".join(cur))
+                cur, cur_len = [s], len(s)
+            else:
+                cur.append(s)
+                cur_len += len(s) + 1
+        if cur:
+            joined = " ".join(cur)
+            if len(joined) <= max_chars:
+                out.append(joined)
+            else:
+                line = ""
+                for w in joined.split():
+                    if line and len(line) + len(w) + 1 > max_chars:
+                        out.append(line)
+                        line = w
+                    else:
+                        line = (line + " " + w).strip()
+                if line:
+                    out.append(line)
+    # Last-resort hard slice — handles pathological no-whitespace input
+    final: list[str] = []
+    for p in out:
+        if len(p) <= max_chars:
+            final.append(p)
+        else:
+            for k in range(0, len(p), max_chars):
+                final.append(p[k:k + max_chars])
+    return final
+
+
+def _xtts_request(text: str, voice: str, speed: float, host: str,
+                  language: str) -> bytes:
+    payload = {"voice": voice, "input": text, "language": language,
+               "response_format": "mp3", "speed": speed}
     req = urllib.request.Request(
         f"{host.rstrip('/')}/v1/audio/speech",
         data=json.dumps(payload).encode("utf-8"),
@@ -115,6 +161,26 @@ def tts_xtts(text: str, voice: str, speed: float, host: str,
     )
     with urllib.request.urlopen(req, timeout=600) as resp:
         return resp.read()
+
+
+def tts_xtts(text: str, voice: str, speed: float, host: str,
+             language: str = "fr") -> bytes:
+    """Local XTTS-v2 server (Blackwell-compatible).
+
+    XTTS has a hard 400-token-per-inference limit. Long inputs are
+    transparently split at sentence (then clause, then word) boundaries
+    and the resulting libmp3lame fixed-bitrate MP3 fragments are
+    byte-concatenated — valid since each MP3 frame is self-contained.
+    """
+    pieces = _split_for_xtts(text)
+    if len(pieces) <= 1:
+        return _xtts_request(text, voice, speed, host, language)
+    out = bytearray()
+    for piece in pieces:
+        if not piece.strip():
+            continue
+        out.extend(_xtts_request(piece, voice, speed, host, language))
+    return bytes(out)
 
 
 def tts_openai(text: str, voice: str, speed: float, api_key: str,
