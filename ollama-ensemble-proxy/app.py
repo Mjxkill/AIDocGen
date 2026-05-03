@@ -27,7 +27,7 @@ from core.config import DossierConfig
 from core.engine import DossierEngine
 from core.auth import get_current_user, get_admin_user, create_access_token, verify_password, get_password_hash, _get_users, _save_users, ACCESS_TOKEN_EXPIRE_MINUTES
 from core.logging_config import configure_logging, get_logger
-from core import audit, cost
+from core import audit, cost, notify
 
 configure_logging()
 log = get_logger("aidocgen.app")
@@ -381,6 +381,161 @@ async def all_costs(period: str = "month", admin: dict = Depends(get_admin_user)
     since_ts = _start_of_month_ts() if period == "month" else None
     return cost.summary(BASE_DIR / "data", since_ts=since_ts)
 
+# --- NOTIFICATION PREFERENCES ---
+class NotificationPrefs(BaseModel):
+    email: Optional[str] = None
+    notification_mode: Optional[str] = None  # off | immediate | digest
+    webhook_url: Optional[str] = None
+    regenerate_secret: Optional[bool] = False
+
+
+def _user_by_id(user_id: str) -> dict | None:
+    if not user_id:
+        return None
+    return next((u for u in _get_users() if u.get("id") == user_id), None)
+
+
+def _ensure_webhook_secret(user: dict, force: bool = False) -> str:
+    sec = user.get("webhook_secret") or ""
+    if not sec or force:
+        sec = uuid.uuid4().hex + uuid.uuid4().hex  # 64 hex chars
+        user["webhook_secret"] = sec
+    return sec
+
+
+@app.get("/v1/notifications/preferences")
+async def get_notification_prefs(current_user: dict = Depends(get_current_user)):
+    u = _user_by_id(current_user["id"]) or {}
+    return {
+        "email": u.get("email", ""),
+        "notification_mode": u.get("notification_mode", "off"),
+        "webhook_url": u.get("webhook_url", ""),
+        "webhook_secret": u.get("webhook_secret", ""),
+        "smtp_configured": notify.smtp_configured(),
+    }
+
+
+@app.put("/v1/notifications/preferences")
+async def update_notification_prefs(payload: NotificationPrefs,
+                                    current_user: dict = Depends(get_current_user)):
+    users = _get_users()
+    user = next((u for u in users if u["id"] == current_user["id"]), None)
+    if not user:
+        raise HTTPException(404, "user not found")
+    if payload.notification_mode is not None:
+        if payload.notification_mode not in ("off", "immediate", "digest"):
+            raise HTTPException(400, "notification_mode must be off|immediate|digest")
+        user["notification_mode"] = payload.notification_mode
+    if payload.email is not None:
+        em = payload.email.strip()
+        if em and ("@" not in em or len(em) > 200):
+            raise HTTPException(400, "invalid email")
+        user["email"] = em
+    if payload.webhook_url is not None:
+        url = payload.webhook_url.strip()
+        if url and not (url.startswith("http://") or url.startswith("https://")):
+            raise HTTPException(400, "webhook_url must start with http:// or https://")
+        user["webhook_url"] = url
+        if url and not user.get("webhook_secret"):
+            _ensure_webhook_secret(user, force=False)
+        if not url:
+            user["webhook_secret"] = ""
+    if payload.regenerate_secret and (user.get("webhook_url") or "").strip():
+        _ensure_webhook_secret(user, force=True)
+    _save_users(users)
+    return {
+        "email": user.get("email", ""),
+        "notification_mode": user.get("notification_mode", "off"),
+        "webhook_url": user.get("webhook_url", ""),
+        "webhook_secret": user.get("webhook_secret", ""),
+    }
+
+
+@app.post("/v1/notifications/test")
+@limiter.limit("5/minute")
+async def test_notification(request: Request, current_user: dict = Depends(get_current_user)):
+    user = _user_by_id(current_user["id"]) or {}
+    email = (user.get("email") or "").strip()
+    webhook_url = (user.get("webhook_url") or "").strip()
+    result = {"email": None, "webhook": None}
+    payload = {
+        "event": "test",
+        "kind": "test",
+        "status": "done",
+        "job_id": "test-" + uuid.uuid4().hex[:8],
+        "title": "Test notification from AIDocGen",
+        "user_id": user.get("id", ""),
+        "user_name": user.get("username", ""),
+        "ts": int(time.time()),
+    }
+    if email:
+        ok, err = await notify.send_email(
+            email,
+            "[AIDocGen] Test notification",
+            f"Hello {user.get('username', '')},\n\nThis is a test email from AIDocGen.\nIf you can read this, your notifications are configured correctly.\n\n— AIDocGen",
+        )
+        result["email"] = {"ok": ok, "error": err}
+    if webhook_url:
+        ok, err = await notify.send_webhook(
+            webhook_url, user.get("webhook_secret") or "", payload,
+        )
+        result["webhook"] = {"ok": ok, "error": err}
+    return result
+
+
+# --- JOB → NOTIFICATION GLUE ---
+def _read_dossier_status(run_id: str) -> dict | None:
+    p = DATA_DIR / run_id / "status.json"
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _attach_notify(task: asyncio.Task, *, kind: str, job_id: str,
+                   status_reader) -> None:
+    """Add a done-callback that fires email/webhook notifications based on the
+    final job state (done/failed only — cancelled is skipped)."""
+    def _on_done(t: asyncio.Task):
+        try:
+            if t.cancelled():
+                return
+            data = status_reader(job_id) or {}
+            owner_id = data.get("owner_id")
+            if not owner_id:
+                return
+            state = data.get("state", "")
+            if state == "completed":
+                status = "done"
+            elif state == "failed":
+                status = "failed"
+            else:
+                return
+            user = _user_by_id(owner_id)
+            if not user:
+                return
+            title = (data.get("question") or data.get("source_filename")
+                     or data.get("md_path") or data.get("url")
+                     or data.get("prompt") or data.get("basename") or "")
+            error = data.get("error") or ""
+            asyncio.create_task(notify.notify_event(
+                BASE_DIR / "data", user,
+                event=f"{kind}.{status}", kind=kind, status=status,
+                job_id=job_id, title=str(title)[:200], error=str(error)[:500],
+            ))
+        except Exception as e:
+            log.warning("notify hook error",
+                        extra={"error": str(e), "kind": kind, "job_id": job_id})
+    task.add_done_callback(_on_done)
+
+
+@app.on_event("startup")
+async def _start_digest_loop():
+    asyncio.create_task(notify.digest_loop(BASE_DIR / "data", _get_users))
+
+
 # --- DOSSIER API ---
 @app.get("/v1/dossier/prompts")
 async def list_prompts(user: dict = Depends(get_current_user)):
@@ -451,6 +606,8 @@ async def start_run(request: Request, req: RunRequest, user: dict = Depends(get_
         include_images=bool(req.include_images),
         generate_ai_images=bool(req.generate_ai_images),
     ))
+    _attach_notify(_DOSSIER_TASKS[run_id], kind="dossier", job_id=run_id,
+                   status_reader=_read_dossier_status)
     audit.record(BASE_DIR / "data", action="dossier.run",
                  actor_id=user["id"], actor_name=user["username"],
                  target=run_id, question=req.question[:120])
@@ -692,6 +849,8 @@ async def reset_run(run_id: str, user: dict = Depends(get_current_user)):
     engine = _get_engine(d.get("ollama_url"), d)
     tags = d.get("tags", [])
     _DOSSIER_TASKS[run_id] = asyncio.create_task(engine.run(run_id, d["question"], resume=False, language=d.get("language", "fr"), coder_model=d.get("coder_model"), tags=tags, include_images=bool(d.get("include_images", True)), generate_ai_images=bool(d.get("generate_ai_images", False))))
+    _attach_notify(_DOSSIER_TASKS[run_id], kind="dossier", job_id=run_id,
+                   status_reader=_read_dossier_status)
     return {"status": "ok"}
 
 @app.post("/v1/dossier/runs/{run_id}/cancel")
@@ -718,6 +877,8 @@ async def resume_run(run_id: str, user: dict = Depends(get_current_user)):
     engine = _get_engine(d.get("ollama_url"), d)
     tags = d.get("tags", [])
     _DOSSIER_TASKS[run_id] = asyncio.create_task(engine.run(run_id, d["question"], resume=True, language=d.get("language", "fr"), coder_model=d.get("coder_model"), tags=tags, include_images=bool(d.get("include_images", True)), generate_ai_images=bool(d.get("generate_ai_images", False))))
+    _attach_notify(_DOSSIER_TASKS[run_id], kind="dossier", job_id=run_id,
+                   status_reader=_read_dossier_status)
     return {"status": "ok"}
 
 @app.post("/v1/dossier/runs/{run_id}/approve")
@@ -729,6 +890,8 @@ async def approve_run(run_id: str, user: dict = Depends(get_current_user)):
     engine = _get_engine(d.get("ollama_url"), d)
     tags = d.get("tags", [])
     _DOSSIER_TASKS[run_id] = asyncio.create_task(engine.run(run_id, d["question"], resume=True, language=d.get("language", "fr"), coder_model=d.get("coder_model"), tags=tags, include_images=bool(d.get("include_images", True)), generate_ai_images=bool(d.get("generate_ai_images", False))))
+    _attach_notify(_DOSSIER_TASKS[run_id], kind="dossier", job_id=run_id,
+                   status_reader=_read_dossier_status)
     return {"status": "ok"}
 
 @app.get("/v1/dossier/runs/{run_id}/report/pdf")
@@ -1069,6 +1232,8 @@ async def pdf_convert(
     _PDF_TASKS[job_id] = asyncio.create_task(
         _run_pdf_job(job_id, mode, chosen_model, pdf_path, out_path)
     )
+    _attach_notify(_PDF_TASKS[job_id], kind="pdf", job_id=job_id,
+                   status_reader=_read_pdf_status)
     return {"job_id": job_id}
 
 @app.get("/v1/pdf/jobs/{job_id}")
@@ -1356,6 +1521,8 @@ async def video_convert(
         _run_video_job(job_id, mode, chosen_model, chunk, parallel, overlap, video_path, out_path,
                        synthesis_model=chosen_synth)
     )
+    _attach_notify(_VIDEO_TASKS[job_id], kind="video", job_id=job_id,
+                   status_reader=_read_video_status)
     return {"job_id": job_id}
 
 def _attach_video_progress(job_id: str, data: dict) -> dict:
@@ -1406,6 +1573,8 @@ async def video_job_resume(job_id: str, user: dict = Depends(get_current_user)):
             video_path, out_path, resumed=True,
         )
     )
+    _attach_notify(_VIDEO_TASKS[job_id], kind="video", job_id=job_id,
+                   status_reader=_read_video_status)
     return {"status": "ok"}
 
 @app.get("/v1/video/jobs/{job_id}/download")
@@ -1670,6 +1839,8 @@ async def audio_convert(
         _run_audio_job(job_id, chosen_model, chunk, parallel, overlap, audio_path, out_path,
                        synthesis_model=chosen_synth)
     )
+    _attach_notify(_AUDIO_TASKS[job_id], kind="audio", job_id=job_id,
+                   status_reader=_read_audio_status)
     return {"job_id": job_id}
 
 @app.get("/v1/audio/jobs/{job_id}")
@@ -1709,6 +1880,8 @@ async def audio_job_resume(job_id: str, user: dict = Depends(get_current_user)):
             synthesis_model=data.get("synthesis_model") if data.get("synthesis_requested") else None,
         )
     )
+    _attach_notify(_AUDIO_TASKS[job_id], kind="audio", job_id=job_id,
+                   status_reader=_read_audio_status)
     return {"status": "ok"}
 
 @app.get("/v1/audio/jobs/{job_id}/download")
@@ -1965,6 +2138,8 @@ async def web_scrape(request: Request, req: ScrapeRequest, user: dict = Depends(
         "created_at": int(time.time()), "updated_at": int(time.time()),
     })
     _WEB_TASKS[job_id] = asyncio.create_task(_run_web_scrape(job_id, req.url.strip()))
+    _attach_notify(_WEB_TASKS[job_id], kind="web", job_id=job_id,
+                   status_reader=_read_web_status)
     return {"job_id": job_id}
 
 @app.post("/v1/web/crawl")
@@ -1985,6 +2160,8 @@ async def web_crawl(request: Request, req: CrawlRequest, user: dict = Depends(ge
         "created_at": int(time.time()), "updated_at": int(time.time()),
     })
     _WEB_TASKS[job_id] = asyncio.create_task(_run_web_crawl(job_id, req.url.strip(), req.max_pages))
+    _attach_notify(_WEB_TASKS[job_id], kind="web", job_id=job_id,
+                   status_reader=_read_web_status)
     return {"job_id": job_id}
 
 @app.get("/v1/web/jobs/{job_id}")
@@ -2122,6 +2299,8 @@ async def web_agent(request: Request, req: AgentRequest, user: dict = Depends(ge
         "created_at": int(time.time()), "updated_at": int(time.time()),
     })
     _WEB_TASKS[job_id] = asyncio.create_task(_run_web_agent(job_id, req.prompt.strip()))
+    _attach_notify(_WEB_TASKS[job_id], kind="web", job_id=job_id,
+                   status_reader=_read_web_status)
     return {"job_id": job_id}
 
 async def _push_md_files_to_dify(files: list[tuple[str, str]], dataset_name: str) -> dict:
@@ -2609,6 +2788,8 @@ async def audiobook_from_run(request: Request, req: AudiobookFromRunRequest, use
                            bool(req.summarize), summary_model=chosen_summary_model,
                            summary_origin=chosen_summary_origin)
     )
+    _attach_notify(_AUDIOBOOK_TASKS[job_id], kind="audiobook", job_id=job_id,
+                   status_reader=_read_audiobook_status)
     return {"job_id": job_id}
 
 @app.post("/v1/audiobook/from-upload")
@@ -2662,6 +2843,8 @@ async def audiobook_from_upload(
                            bool(summarize), summary_model=chosen_summary_model,
                            summary_origin=chosen_summary_origin)
     )
+    _attach_notify(_AUDIOBOOK_TASKS[job_id], kind="audiobook", job_id=job_id,
+                   status_reader=_read_audiobook_status)
     return {"job_id": job_id}
 
 class VoicePreviewRequest(BaseModel):
@@ -2728,6 +2911,8 @@ async def audiobook_job_resume(job_id: str, user: dict = Depends(get_current_use
             resumed=True,
         )
     )
+    _attach_notify(_AUDIOBOOK_TASKS[job_id], kind="audiobook", job_id=job_id,
+                   status_reader=_read_audiobook_status)
     return {"status": "ok"}
 
 @app.get("/v1/audiobook/jobs/{job_id}/download")

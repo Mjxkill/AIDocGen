@@ -23,6 +23,7 @@ const NavIcon = ({ type, ...props }: { type: string } & React.SVGProps<SVGSVGEle
     wiki: "M18 2H6c-1.1 0-2 .9-2 2v16c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zM6 4h5v8l-2.5-1.5L6 12V4z",
     users: "M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z",
     logout: "M17 7l-1.41 1.41L18.17 11H8v2h10.17l-2.58 2.58L17 17l5-5zM4 5h8V3H4c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h8v-2H4V5z",
+    profile: "M19.43 12.98c.04-.32.07-.64.07-.98s-.03-.66-.07-.98l2.11-1.65a.5.5 0 0 0 .12-.64l-2-3.46a.5.5 0 0 0-.6-.22l-2.49 1a7.03 7.03 0 0 0-1.69-.98l-.38-2.65A.488.488 0 0 0 14 2h-4a.488.488 0 0 0-.49.42l-.38 2.65c-.61.25-1.17.59-1.69.98l-2.49-1a.5.5 0 0 0-.6.22l-2 3.46a.5.5 0 0 0 .12.64l2.11 1.65c-.04.32-.07.65-.07.98s.03.66.07.98l-2.11 1.65a.5.5 0 0 0-.12.64l2 3.46c.13.22.39.31.6.22l2.49-1c.52.39 1.08.73 1.69.98l.38 2.65c.05.24.25.42.49.42h4c.24 0 .44-.18.49-.42l.38-2.65c.61-.25 1.17-.59 1.69-.98l2.49 1c.21.09.47 0 .6-.22l2-3.46a.5.5 0 0 0-.12-.64l-2.11-1.65zM12 15.5A3.5 3.5 0 1 1 12 8.5a3.5 3.5 0 0 1 0 7z",
   };
   return <svg viewBox="0 0 24 24" fill="currentColor" {...props}><path d={paths[type] || paths.dashboard}/></svg>;
 };
@@ -1944,6 +1945,174 @@ const ForcePasswordChange = ({ onDone }: { onDone: () => void }) => {
   );
 };
 
+// ── PROFILE (current user: email, notifications, webhook, password) ──
+type NotifPrefs = {
+  email: string;
+  notification_mode: 'off' | 'immediate' | 'digest';
+  webhook_url: string;
+  webhook_secret: string;
+  smtp_configured?: boolean;
+};
+
+const Profile = () => {
+  const { t } = useT();
+  const [prefs, setPrefs] = useState<NotifPrefs | null>(null);
+  const [draft, setDraft] = useState<NotifPrefs | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [showSecret, setShowSecret] = useState(false);
+  const [testResult, setTestResult] = useState<string>('');
+  // Password change
+  const [pwCur, setPwCur] = useState('');
+  const [pwNew, setPwNew] = useState('');
+  const [pwNew2, setPwNew2] = useState('');
+  const [pwBusy, setPwBusy] = useState(false);
+
+  const load = () => {
+    axios.get('/v1/notifications/preferences').then(r => {
+      setPrefs(r.data);
+      setDraft(r.data);
+    }).catch(() => {});
+  };
+  useEffect(load, []);
+
+  if (!prefs || !draft) return <div style={{padding:40,color:'var(--text-muted)'}}>{t('common.loading')}</div>;
+
+  const dirty = JSON.stringify(prefs) !== JSON.stringify(draft);
+
+  const save = async (regenerateSecret = false) => {
+    setBusy(true); setTestResult('');
+    try {
+      const r = await axios.put('/v1/notifications/preferences', {
+        email: draft.email,
+        notification_mode: draft.notification_mode,
+        webhook_url: draft.webhook_url,
+        regenerate_secret: regenerateSecret,
+      });
+      const next = { ...prefs, ...r.data };
+      setPrefs(next); setDraft(next);
+    } catch (e: any) {
+      alert(t('common.error') + ': ' + (e?.response?.data?.detail || e.message));
+    } finally { setBusy(false); }
+  };
+
+  const sendTest = async () => {
+    setBusy(true); setTestResult('');
+    try {
+      const r = await axios.post('/v1/notifications/test');
+      const lines: string[] = [];
+      if (r.data.email !== null) lines.push(`Email: ${r.data.email.ok ? '✅ envoyé' : '❌ ' + r.data.email.error}`);
+      if (r.data.webhook !== null) lines.push(`Webhook: ${r.data.webhook.ok ? '✅ ping OK' : '❌ ' + r.data.webhook.error}`);
+      setTestResult(lines.join(' · ') || 'Configure email ou webhook puis enregistre avant de tester.');
+    } catch (e: any) {
+      setTestResult('❌ ' + (e?.response?.data?.detail || e.message));
+    } finally { setBusy(false); }
+  };
+
+  const changePw = async () => {
+    if (pwNew.length < 4) { alert('Mot de passe trop court (min 4 caractères)'); return; }
+    if (pwNew !== pwNew2) { alert('Les mots de passe ne correspondent pas'); return; }
+    setPwBusy(true);
+    try {
+      await axios.post('/v1/auth/change-password',
+        { current_password: pwCur, new_password: pwNew });
+      setPwCur(''); setPwNew(''); setPwNew2('');
+      alert('Mot de passe modifié.');
+    } catch (e: any) {
+      alert(t('common.error') + ': ' + (e?.response?.data?.detail || e.message));
+    } finally { setPwBusy(false); }
+  };
+
+  const card: React.CSSProperties = {
+    background: 'var(--bg-surface)', border: '1px solid var(--border)',
+    borderRadius: 'var(--radius)', padding: 20, marginBottom: 16, maxWidth: 720,
+  };
+  const heading: React.CSSProperties = {
+    fontSize: 12, textTransform: 'uppercase', letterSpacing: '0.05em',
+    color: 'var(--text-secondary)', marginBottom: 14,
+  };
+  const label: React.CSSProperties = {
+    fontSize: 12, color: 'var(--text-secondary)', marginBottom: 4, display: 'block',
+  };
+
+  return (
+    <div>
+      {/* Notifications */}
+      <div style={card}>
+        <div style={heading}>📨 Notifications</div>
+        {prefs.smtp_configured === false && (
+          <div style={{padding: 8, marginBottom: 12, background: 'var(--bg-elevated)',
+                       border: '1px solid var(--border)', borderRadius: 4, fontSize: 12,
+                       color: '#f59e0b'}}>
+            ⚠ SMTP non configuré côté serveur. Les emails ne seront pas envoyés tant que l'admin n'aura pas renseigné <code>SMTP_*</code> dans <code>ensemble-proxy.env</code>.
+          </div>
+        )}
+        <label style={label}>Email (destinataire des notifications)</label>
+        <input type="email" placeholder="you@example.com" value={draft.email}
+               onChange={e => setDraft({ ...draft, email: e.target.value })}
+               style={{width: '100%', marginBottom: 14}} />
+
+        <label style={label}>Mode</label>
+        <div style={{display: 'flex', gap: 16, marginBottom: 14, flexWrap: 'wrap'}}>
+          {(['off', 'immediate', 'digest'] as const).map(m => (
+            <label key={m} style={{display:'flex', gap:6, alignItems:'center', cursor:'pointer', fontSize: 13}}>
+              <input type="radio" name="notif-mode" checked={draft.notification_mode === m}
+                     onChange={() => setDraft({ ...draft, notification_mode: m })} />
+              {m === 'off' ? 'Désactivé' : m === 'immediate' ? 'Immédiat (par évènement)' : 'Récap journalier (09:00)'}
+            </label>
+          ))}
+        </div>
+
+        <label style={label}>Webhook URL (optionnel) — payload signé HMAC-SHA256</label>
+        <input type="url" placeholder="https://your-server.example.com/hook" value={draft.webhook_url}
+               onChange={e => setDraft({ ...draft, webhook_url: e.target.value })}
+               style={{width: '100%', marginBottom: 10}} />
+
+        {draft.webhook_url && prefs.webhook_secret && (
+          <div style={{display:'flex', gap:8, alignItems:'center', marginBottom: 12, fontSize: 12}}>
+            <span style={{color: 'var(--text-secondary)'}}>Secret :</span>
+            <code style={{flex:1, fontFamily:'monospace', fontSize: 11, padding:'4px 8px',
+                          background:'var(--bg-elevated)', borderRadius:4, overflow:'hidden',
+                          textOverflow:'ellipsis', whiteSpace:'nowrap'}}>
+              {showSecret ? prefs.webhook_secret : '•'.repeat(32) + '…'}
+            </code>
+            <button className="btn-sm btn-outline" onClick={() => setShowSecret(s => !s)}>
+              {showSecret ? 'Masquer' : 'Afficher'}
+            </button>
+            <button className="btn-sm btn-outline" disabled={busy} onClick={() => {
+              if (confirm('Régénérer le secret invalidera les anciennes signatures. Continuer ?'))
+                save(true);
+            }}>Régénérer</button>
+          </div>
+        )}
+
+        <div style={{display:'flex', gap:8, alignItems:'center'}}>
+          <button className="btn-primary" disabled={!dirty || busy} onClick={() => save()}>
+            {busy ? '…' : 'Enregistrer'}
+          </button>
+          <button className="btn-outline" disabled={busy} onClick={sendTest}>
+            Envoyer un test
+          </button>
+          {testResult && <span style={{fontSize: 12, color: 'var(--text-secondary)'}}>{testResult}</span>}
+        </div>
+      </div>
+
+      {/* Password */}
+      <div style={card}>
+        <div style={heading}>🔒 Mot de passe</div>
+        <input type="password" placeholder="Mot de passe actuel" value={pwCur}
+               onChange={e => setPwCur(e.target.value)} style={{width: '100%', marginBottom: 8}} />
+        <input type="password" placeholder="Nouveau mot de passe" value={pwNew}
+               onChange={e => setPwNew(e.target.value)} style={{width: '100%', marginBottom: 8}} />
+        <input type="password" placeholder="Confirme le nouveau mot de passe" value={pwNew2}
+               onChange={e => setPwNew2(e.target.value)} style={{width: '100%', marginBottom: 12}} />
+        <button className="btn-primary" disabled={pwBusy || !pwCur || !pwNew} onClick={changePw}>
+          {pwBusy ? '…' : 'Mettre à jour'}
+        </button>
+      </div>
+    </div>
+  );
+};
+
 // ── USER MANAGER (admin only) ──
 const UserManager = () => {
   const { t } = useT();
@@ -2172,6 +2341,7 @@ export default function App() {
           {me?.role === 'admin' && (
             <button className={`nav-item ${view==='users'?'active':''}`} onClick={()=>setView('users')} title={t('nav.users')}><NavIcon type="users" /></button>
           )}
+          <button className={`nav-item ${view==='profile'?'active':''}`} onClick={()=>setView('profile')} title={t('nav.profile')}><NavIcon type="profile" /></button>
         </nav>
         <div style={{marginTop:'auto', display:'flex', flexDirection:'column', gap:6, alignItems:'center'}}>
           <ThemeToggle />
@@ -2183,7 +2353,7 @@ export default function App() {
       {/* ── MAIN ── */}
       <main className="main-content">
         <header className="header-top">
-          <h2>{view === 'dashboard' ? t('title.dashboard') : view === 'tools' ? t('title.tools') : view === 'wiki' ? t('title.wiki') : view === 'users' ? t('title.users') : t('title.servers')}</h2>
+          <h2>{view === 'dashboard' ? t('title.dashboard') : view === 'tools' ? t('title.tools') : view === 'wiki' ? t('title.wiki') : view === 'users' ? t('title.users') : view === 'profile' ? t('title.profile') : t('title.servers')}</h2>
           {metrics && (
             <div className="metrics-row-horizontal">
               <div className="mini-metric"><label>CPU {metrics.cpu_percent}%</label><div className="metric-progress small"><div className="metric-fill" style={{width:`${metrics.cpu_percent}%`}}/></div></div>
@@ -2272,7 +2442,7 @@ export default function App() {
               );
             })}
           </div>
-        </>) : view === 'tools' ? <Tools servers={srv} srvIdx={sIdx} /> : view === 'wiki' ? <Suspense fallback={<div style={{padding:40,textAlign:'center',color:'var(--text-muted)'}}>{t('common.loading')}</div>}><Wiki /></Suspense> : view === 'users' ? (me?.role === 'admin' ? <UserManager /> : <div className="info-card">{t('common.access_denied')}</div>) : <ModelManager />}
+        </>) : view === 'tools' ? <Tools servers={srv} srvIdx={sIdx} /> : view === 'wiki' ? <Suspense fallback={<div style={{padding:40,textAlign:'center',color:'var(--text-muted)'}}>{t('common.loading')}</div>}><Wiki /></Suspense> : view === 'users' ? (me?.role === 'admin' ? <UserManager /> : <div className="info-card">{t('common.access_denied')}</div>) : view === 'profile' ? <Profile /> : <ModelManager />}
       </main>
 
       {detailId && <RunDetailPanel runId={detailId} onClose={()=>setDetailId(null)} />}

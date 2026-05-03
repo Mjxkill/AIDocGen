@@ -21,6 +21,7 @@ const fr: Dict = {
   'nav.wiki': 'Wiki — documentation complète',
   'nav.servers': 'Serveurs — configurer les endpoints Ollama',
   'nav.users': 'Utilisateurs — gestion des comptes (admin)',
+  'nav.profile': 'Profil — notifications, mot de passe',
   'nav.logout': 'Déconnexion',
   'nav.lang': 'Langue de l\'interface',
 
@@ -30,6 +31,7 @@ const fr: Dict = {
   'title.wiki': 'Wiki',
   'title.servers': 'Serveurs',
   'title.users': 'Utilisateurs',
+  'title.profile': 'Profil',
 
   // common
   'common.loading': 'Chargement…',
@@ -164,6 +166,7 @@ const en: Dict = {
   'nav.wiki': 'Wiki — full documentation',
   'nav.servers': 'Servers — configure Ollama endpoints',
   'nav.users': 'Users — admin-only account management',
+  'nav.profile': 'Profile — notifications, password',
   'nav.logout': 'Log out',
   'nav.lang': 'Interface language',
 
@@ -172,6 +175,7 @@ const en: Dict = {
   'title.wiki': 'Wiki',
   'title.servers': 'Servers',
   'title.users': 'Users',
+  'title.profile': 'Profile',
 
   'common.loading': 'Loading…',
   'common.cancel': 'Cancel',
@@ -297,6 +301,7 @@ const ru: Dict = {
   'nav.wiki': 'Wiki — полная документация',
   'nav.servers': 'Серверы — настройка Ollama',
   'nav.users': 'Пользователи — управление учётными записями (admin)',
+  'nav.profile': 'Профиль — уведомления, пароль',
   'nav.logout': 'Выйти',
   'nav.lang': 'Язык интерфейса',
 
@@ -305,6 +310,7 @@ const ru: Dict = {
   'title.wiki': 'Wiki',
   'title.servers': 'Серверы',
   'title.users': 'Пользователи',
+  'title.profile': 'Профиль',
 
   'common.loading': 'Загрузка…',
   'common.cancel': 'Отмена',
@@ -428,6 +434,7 @@ const it: Dict = {
   'nav.wiki': 'Wiki — documentazione completa',
   'nav.servers': 'Server — configura gli endpoint Ollama',
   'nav.users': 'Utenti — gestione account (admin)',
+  'nav.profile': 'Profilo — notifiche, password',
   'nav.logout': 'Esci',
   'nav.lang': 'Lingua interfaccia',
 
@@ -436,6 +443,7 @@ const it: Dict = {
   'title.wiki': 'Wiki',
   'title.servers': 'Server',
   'title.users': 'Utenti',
+  'title.profile': 'Profilo',
 
   'common.loading': 'Caricamento…',
   'common.cancel': 'Annulla',
@@ -561,6 +569,7 @@ const de: Dict = {
   'nav.wiki': 'Wiki — vollständige Dokumentation',
   'nav.servers': 'Server — Ollama-Endpunkte konfigurieren',
   'nav.users': 'Benutzer — Kontoverwaltung (Admin)',
+  'nav.profile': 'Profil — Benachrichtigungen, Passwort',
   'nav.logout': 'Abmelden',
   'nav.lang': 'Oberflächensprache',
 
@@ -569,6 +578,7 @@ const de: Dict = {
   'title.wiki': 'Wiki',
   'title.servers': 'Server',
   'title.users': 'Benutzer',
+  'title.profile': 'Profil',
 
   'common.loading': 'Lädt…',
   'common.cancel': 'Abbrechen',
@@ -694,6 +704,7 @@ const es: Dict = {
   'nav.wiki': 'Wiki — documentación completa',
   'nav.servers': 'Servidores — configurar endpoints Ollama',
   'nav.users': 'Usuarios — gestión de cuentas (admin)',
+  'nav.profile': 'Perfil — notificaciones, contraseña',
   'nav.logout': 'Cerrar sesión',
   'nav.lang': 'Idioma de la interfaz',
 
@@ -702,6 +713,7 @@ const es: Dict = {
   'title.wiki': 'Wiki',
   'title.servers': 'Servidores',
   'title.users': 'Usuarios',
+  'title.profile': 'Perfil',
 
   'common.loading': 'Cargando…',
   'common.cancel': 'Cancelar',

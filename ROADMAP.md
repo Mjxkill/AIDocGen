@@ -31,7 +31,7 @@ Légende effort : `S` < 4h · `M` 0,5–2 jours · `L` > 2 jours · `XL` > 1 sem
 
 | # | Item | Effort | Statut | Notes |
 |---|------|--------|--------|-------|
-| 12 | **Notifications email + webhook** sur fin de job | M | ☐ | SMTP via env. Préférence par user (immédiat / digest / off). Webhook URL custom par user. |
+| 12 | **Notifications email + webhook** sur fin de job | M | ☑ | core/notify.py: SMTP STARTTLS (Gmail Workspace), webhook signé HMAC-SHA256, digest journalier 09:00 (asyncio loop). Hooks done-callback sur 11 sites de tâches (dossier×4, pdf, video×2, audio×2, web×3, audiobook×3). Endpoints /v1/notifications/{preferences,test}. UI: nouvel onglet « Profil » dans la sidebar (notifications + mot de passe). |
 | 13 | **Recherche full-text** dans dossiers terminés | M | ☐ | Meilisearch local ou Postgres FTS sur `report.md`. |
 | 14 | **Diff entre deux runs** | M | ☐ | UI side-by-side ou wikidiff sur les sections. |
 | 15 | **Cost tracker par job + agrégat user/mois** | M | ☑ | core/cost.py: tarifs DeepSeek/Firecrawl/OpenAI, append-only data/cost_log.jsonl. Hooks Firecrawl scrape/crawl/agent/parse + DeepSeek tokens (audiobook subprocess via env). Endpoints /v1/costs/me et /v1/costs/all (admin) avec filtre period=month. |
