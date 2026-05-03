@@ -49,24 +49,40 @@ _AUDIO_SYMBOL_REPLACEMENTS = [
 
 
 def clean_markdown(md: str) -> str:
-    md = re.sub(r"```[\s\S]*?```", "code source.", md)  # code block → audible label
+    # Code blocks and inline code → drop (audio "code source." floats with no
+    # context; the surrounding prose explains intent better than a label).
+    md = re.sub(r"```[\s\S]*?```", "", md)
     md = re.sub(r"`[^`\n]+`", "", md)
+    # Images
     md = re.sub(r"!\[[^\]]*\]\([^)]+\)\s*", "", md)
+    # Markdown links → keep only the visible text
     md = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", md)
     md = re.sub(r"https?://\S+", "", md)
     md = re.sub(r"^\s*[-=*_]{3,}\s*$", "", md, flags=re.M)
+    # Internal claim/citation tags
     md = re.sub(r"\[CLM-[A-Za-z0-9_\-]+\]", "", md)
+    # Bold / italic markers
     md = re.sub(r"(\*\*|__)(.+?)\1", r"\2", md)
     md = re.sub(r"(\*|_)(.+?)\1", r"\2", md)
+    # Bullet / numbered list prefixes
     md = re.sub(r"^\s*[-*+]\s+", "", md, flags=re.M)
     md = re.sub(r"^\s*\d+\.\s+", "", md, flags=re.M)
-    # Quote/blockquote prefixes
+    # Blockquote prefixes
     md = re.sub(r"^\s*>\s+", "", md, flags=re.M)
+    # HTML tags (anchors `<a name='...'></a>`, `<br>`, `<span>`, etc.) — the
+    # dossier writer emits these for navigation and they get read aloud as
+    # "less-than a name equals quote..." otherwise.
+    md = re.sub(r"<[^>]+>", "", md)
+    # In-text hashtag-style topic markers like `#INGENIEUR`, `#IA` → strip
+    # the leading `#` (the word stays so the sentence still makes sense).
+    md = re.sub(r"(?<![#\w])#(?=[A-Za-zÀ-ÿ])", "", md)
+    # "Section :" / "Section:" prefix on headings (artefact of the dossier
+    # writer's heading numbering) — drop it so chapter titles read clean.
+    md = re.sub(r"^(#{1,6}\s+)Section\s*:\s*", r"\1", md, flags=re.M)
     # Audio-friendly symbol substitutions
     for src, dst in _AUDIO_SYMBOL_REPLACEMENTS:
         md = md.replace(src, dst)
-    # < > as math operators surrounded by spaces (post hashtag-strip so we
-    # don't break HTML — HTML is normally not present in adapted prose).
+    # < > as math operators surrounded by spaces
     md = re.sub(r"\s<\s", " inférieur à ", md)
     md = re.sub(r"\s>\s", " supérieur à ", md)
     # @ used as "at"
