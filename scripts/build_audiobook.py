@@ -101,7 +101,9 @@ def chunk_text(text: str, target: int = 3000) -> list[str]:
 # TTS engines
 # ─────────────────────────────────────────────────────────────────────────────
 
-XTTS_MAX_CHARS = 800  # ~200 tokens; safely below XTTS's 400-token hard limit
+XTTS_MAX_CHARS = 600  # ~150 tokens for typical prose; technical/numeric
+                      # content tokenizes more aggressively, so we retry with
+                      # a smaller cap on HTTP 500 (see _xtts_with_retry).
 
 
 def _split_for_xtts(text: str, max_chars: int = XTTS_MAX_CHARS) -> list[str]:
@@ -163,23 +165,51 @@ def _xtts_request(text: str, voice: str, speed: float, host: str,
         return resp.read()
 
 
+def _xtts_with_retry(text: str, voice: str, speed: float, host: str,
+                     language: str, depth: int = 0) -> bytes:
+    """If XTTS rejects (HTTP 500 — typically the 400-token assertion on
+    technical/dense text), halve the cap and recurse. Caps recursion at
+    depth 6 (text shrunk by ~64x) to avoid runaway."""
+    try:
+        return _xtts_request(text, voice, speed, host, language)
+    except urllib.error.HTTPError as e:
+        if e.code != 500 or depth >= 6 or len(text) <= 60:
+            raise
+        smaller = max(60, len(text) // 2)
+        pieces = _split_for_xtts(text, max_chars=smaller)
+        if len(pieces) <= 1:
+            raise
+        print(f"[xtts] {len(text)} chars rejected (depth {depth}); "
+              f"re-splitting into {len(pieces)} sub-pieces (cap={smaller})",
+              flush=True)
+        out = bytearray()
+        for p in pieces:
+            if not p.strip():
+                continue
+            out.extend(_xtts_with_retry(p, voice, speed, host, language,
+                                        depth=depth + 1))
+        return bytes(out)
+
+
 def tts_xtts(text: str, voice: str, speed: float, host: str,
              language: str = "fr") -> bytes:
     """Local XTTS-v2 server (Blackwell-compatible).
 
     XTTS has a hard 400-token-per-inference limit. Long inputs are
-    transparently split at sentence (then clause, then word) boundaries
-    and the resulting libmp3lame fixed-bitrate MP3 fragments are
-    byte-concatenated — valid since each MP3 frame is self-contained.
+    transparently split at sentence (then clause, then word) boundaries.
+    A piece that still trips the assertion (token-dense content like
+    acronyms/numbers) triggers a recursive halving retry. Resulting
+    libmp3lame fixed-bitrate MP3 fragments are byte-concatenated — valid
+    since each MP3 frame is self-contained.
     """
     pieces = _split_for_xtts(text)
     if len(pieces) <= 1:
-        return _xtts_request(text, voice, speed, host, language)
+        return _xtts_with_retry(text, voice, speed, host, language)
     out = bytearray()
     for piece in pieces:
         if not piece.strip():
             continue
-        out.extend(_xtts_request(piece, voice, speed, host, language))
+        out.extend(_xtts_with_retry(piece, voice, speed, host, language))
     return bytes(out)
 
 
