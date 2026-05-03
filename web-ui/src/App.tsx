@@ -1701,16 +1701,18 @@ const AudiobookTools = () => {
                           {job.epubs.map((e, k) => (
                             <button key={e.name}
                                     className="btn-sm btn-primary"
+                                    style={{width: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', textAlign: 'left'}}
                                     title={`${e.title} (${fmtSize(e.size)}) — EPUB3 with text + audio + SMIL sync`}
                                     onClick={() => downloadEpub(job, e.name)}>
-                              📖 {k + 1}. {e.title.length > 32 ? e.title.slice(0, 30) + '…' : e.title}
+                              📖 {k + 1}. {e.title}
                             </button>
                           ))}
                           {job.epubs_zip_name && (
                             <button className="btn-sm btn-outline"
+                                    style={{width: 220}}
                                     title={`All ${job.epubs.length} EPUB3 in one ZIP (${fmtSize(job.epubs_zip_size)})`}
                                     onClick={() => download(job, 'epubs_zip')}>
-                              📦 ZIP all
+                              📦 ZIP all ({job.epubs.length})
                             </button>
                           )}
                         </>
