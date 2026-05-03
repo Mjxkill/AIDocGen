@@ -27,8 +27,29 @@ from pathlib import Path
 # Markdown cleanup
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Symbols that XTTS reads literally or oddly. Replace with French words.
+# Order matters (longer multi-char patterns first).
+_AUDIO_SYMBOL_REPLACEMENTS = [
+    ("⟶", " vers "), ("→", " vers "), ("⇒", " donne "),
+    ("⟵", " depuis "), ("←", " depuis "),
+    ("↔", " entre "), ("⇔", " équivaut à "),
+    ("≈", " environ "), ("≃", " environ "), ("≅", " environ "),
+    ("≠", " différent de "),
+    ("≤", " inférieur ou égal à "), ("≥", " supérieur ou égal à "),
+    ("±", " plus ou moins "),
+    ("∞", " infini "),
+    ("×", " fois "), ("÷", " divisé par "),
+    ("°C", " degrés Celsius "), ("°F", " degrés Fahrenheit "), ("°", " degrés "),
+    ("™", ""), ("®", ""), ("©", ""),
+    ("…", "."),
+    ("«", " "), ("»", " "),
+    ("“", " "), ("”", " "), ("„", " "),
+    ("→", " vers "),
+]
+
+
 def clean_markdown(md: str) -> str:
-    md = re.sub(r"```[\s\S]*?```", "[code]", md)
+    md = re.sub(r"```[\s\S]*?```", "code source.", md)  # code block → audible label
     md = re.sub(r"`[^`\n]+`", "", md)
     md = re.sub(r"!\[[^\]]*\]\([^)]+\)\s*", "", md)
     md = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", md)
@@ -39,9 +60,31 @@ def clean_markdown(md: str) -> str:
     md = re.sub(r"(\*|_)(.+?)\1", r"\2", md)
     md = re.sub(r"^\s*[-*+]\s+", "", md, flags=re.M)
     md = re.sub(r"^\s*\d+\.\s+", "", md, flags=re.M)
+    # Quote/blockquote prefixes
+    md = re.sub(r"^\s*>\s+", "", md, flags=re.M)
+    # Audio-friendly symbol substitutions
+    for src, dst in _AUDIO_SYMBOL_REPLACEMENTS:
+        md = md.replace(src, dst)
+    # < > as math operators surrounded by spaces (post hashtag-strip so we
+    # don't break HTML — HTML is normally not present in adapted prose).
+    md = re.sub(r"\s<\s", " inférieur à ", md)
+    md = re.sub(r"\s>\s", " supérieur à ", md)
+    # @ used as "at"
+    md = re.sub(r"\s@\s*", " à ", md)
+    # Collapse whitespace
     md = re.sub(r"[ \t]+", " ", md)
     md = re.sub(r"\n{3,}", "\n\n", md)
     return md.strip()
+
+
+_TOC_TITLE_RE = re.compile(
+    r"^(table\s+des\s+mati[èe]res|sommaire|table\s+of\s+contents?|contents?|toc|index)\s*$",
+    re.IGNORECASE,
+)
+
+
+def is_toc_title(title: str) -> bool:
+    return bool(_TOC_TITLE_RE.match((title or "").strip()))
 
 
 def split_into_chapters(md: str) -> list[tuple[str, str]]:
@@ -67,6 +110,9 @@ def split_into_chapters(md: str) -> list[tuple[str, str]]:
 
     out = []
     for title, body_lines in chapters:
+        if is_toc_title(title):
+            print(f"[skip TOC chapter] {title!r}", flush=True)
+            continue
         body = "\n".join(body_lines)
         # Flatten remaining # / ### into sentences with terminal period
         body = re.sub(r"^(#{1,6})\s+(.+)$",
@@ -641,17 +687,18 @@ def summarize_via_ollama(md: str, model: str, base_url: str, api_key: str,
         if not content.strip():
             _write_adapt_progress(idx + 1)
             continue
+        if is_passthrough:
+            # TOC, anchor lists, horizontal rules — useless for audio narration.
+            # Skip entirely (don't cache, don't emit) so the audiobook contains
+            # only adapted prose.
+            print(f"[adapt] {idx+1}/{len(tagged)}: skip passthrough "
+                  f"({len(content)} chars)", flush=True)
+            _write_adapt_progress(idx + 1)
+            continue
         cache_file = Path(cache_dir) / f"sec_{idx:05d}.md"
         if cache_file.exists() and cache_file.stat().st_size > 0:
             out_parts.append(cache_file.read_text(encoding="utf-8").strip())
             print(f"[adapt] {idx+1}/{len(tagged)}: cached", flush=True)
-            _write_adapt_progress(idx + 1)
-            continue
-        if is_passthrough:
-            cache_file.write_text(content, encoding="utf-8")
-            out_parts.append(content.strip())
-            print(f"[adapt] {idx+1}/{len(tagged)}: passthrough ({len(content)} chars)",
-                  flush=True)
             _write_adapt_progress(idx + 1)
             continue
         out = _llm_call({
