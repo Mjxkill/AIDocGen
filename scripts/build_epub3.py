@@ -370,6 +370,7 @@ def main():
     work_dir.mkdir()
 
     epub_files: list[tuple[Path, str]] = []  # (path, human title)
+    m4b_files: list[tuple[Path, str]] = []   # parallel M4B per part (Apple Books)
     # -1 (unassigned) goes first as "Préambule"
     ordered_parts = []
     if -1 in by_part:
@@ -390,6 +391,7 @@ def main():
         section_for_smil: list[tuple[str, float, float]] = []  # (id, t0, t1)
         nav_entries: list[tuple[str, str]] = []
         audio_parts: list[Path] = []
+        chapters_for_m4b: list[tuple[str, Path, float]] = []
         cumulative = 0.0
 
         for sec_i in chapter_indices:
@@ -407,6 +409,7 @@ def main():
             section_for_smil.append((section_id, cumulative, cumulative + dur))
             nav_entries.append((section_id, title))
             audio_parts.append(mp3)
+            chapters_for_m4b.append((title, mp3, dur))
             cumulative += dur
 
         if not section_xhtml_blocks:
@@ -436,16 +439,28 @@ def main():
         print(f"  → {epub_path.name} ({epub_path.stat().st_size/1e6:.1f} MB, "
               f"{cumulative/60:.1f} min)")
 
+        # Companion M4B for Apple Books (which doesn't play sideloaded
+        # SMIL Media Overlays). Same audio, same chapter markers, plays
+        # natively in Books.
+        m4b_name = f"{basename}_part_{order_i+1:02d}_{slug}.m4b"
+        m4b_path = out_dir / m4b_name
+        bb.make_m4b(chapters_for_m4b, m4b_path, part_title)
+        m4b_files.append((m4b_path, part_title))
+        print(f"  → {m4b_path.name} "
+              f"({m4b_path.stat().st_size/1e6:.1f} MB)")
+
     # Cleanup work dir
     shutil.rmtree(work_dir)
 
-    # Bundle ZIP
+    # Bundle ZIP — both EPUB3 and M4B per part, side by side
     zip_path = job / f"{basename}_epub3.zip"
     if zip_path.exists():
         zip_path.unlink()
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_STORED) as zf:
         for ep, _ in epub_files:
             zf.write(ep, arcname=ep.name)
+        for mb, _ in m4b_files:
+            zf.write(mb, arcname=mb.name)
     print(f"[epub3] bundle ZIP: {zip_path.name} "
           f"({zip_path.stat().st_size/1e9:.2f} GB)")
 
@@ -454,12 +469,17 @@ def main():
         {"name": p.name, "size": p.stat().st_size, "title": title}
         for p, title in epub_files
     ]
+    status["m4bs"] = [
+        {"name": p.name, "size": p.stat().st_size, "title": title}
+        for p, title in m4b_files
+    ]
     status["epubs_zip_name"] = zip_path.name
     status["epubs_zip_size"] = zip_path.stat().st_size
     (job / "status.json").write_text(
         json.dumps(status, ensure_ascii=False, indent=2)
     )
-    print(f"[epub3] done. {len(epub_files)} EPUB3(s) in {out_dir}")
+    print(f"[epub3] done. {len(epub_files)} EPUB3 + {len(m4b_files)} M4B "
+          f"in {out_dir}")
 
 
 if __name__ == "__main__":

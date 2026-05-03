@@ -3044,20 +3044,25 @@ async def audiobook_download_url(job_id: str, type: str = "m4b",
                                   name: Optional[str] = None,
                                   user: dict = Depends(get_current_user)):
     """Issue a 10-min signed URL for a native browser download.
-    type: m4b | zip | summary | epub | epubs_zip
-    For type=epub, `name` must be the filename of one of the EPUB3 files
-    listed in status.epubs."""
+    type: m4b | zip | summary | epub | m4b_part | epubs_zip
+    For type in {epub, m4b_part}, `name` must be the filename of one of
+    the corresponding files listed in status.epubs / status.m4bs."""
     _check_audiobook_access(job_id, user)
     data = _read_audiobook_status(job_id) or {}
     if type == "epub":
         if not name:
             raise HTTPException(400, "name= required for type=epub")
-        epubs = data.get("epubs") or []
-        if not any(e.get("name") == name for e in epubs):
+        if not any(e.get("name") == name for e in data.get("epubs") or []):
             raise HTTPException(404, f"epub {name!r} not in this job")
         scope = f"audiobook:{job_id}:epub:{name}"
-        url = (f"/v1/audiobook/jobs/{job_id}/download?type=epub&"
-               f"name={name}&token=")
+        url = f"/v1/audiobook/jobs/{job_id}/download?type=epub&name={name}&token="
+    elif type == "m4b_part":
+        if not name:
+            raise HTTPException(400, "name= required for type=m4b_part")
+        if not any(m.get("name") == name for m in data.get("m4bs") or []):
+            raise HTTPException(404, f"m4b part {name!r} not in this job")
+        scope = f"audiobook:{job_id}:m4b_part:{name}"
+        url = f"/v1/audiobook/jobs/{job_id}/download?type=m4b_part&name={name}&token="
     elif type == "epubs_zip":
         scope = f"audiobook:{job_id}:epubs_zip"
         url = f"/v1/audiobook/jobs/{job_id}/download?type=epubs_zip&token="
@@ -3065,7 +3070,8 @@ async def audiobook_download_url(job_id: str, type: str = "m4b",
         scope = f"audiobook:{job_id}:{type}"
         url = f"/v1/audiobook/jobs/{job_id}/download?type={type}&token="
     else:
-        raise HTTPException(400, "type must be m4b|zip|summary|epub|epubs_zip")
+        raise HTTPException(400,
+            "type must be m4b|zip|summary|epub|m4b_part|epubs_zip")
     tok = create_download_token(user["id"], scope, expires_in=600)
     return {"url": url + tok, "expires_in": 600}
 
@@ -3074,10 +3080,10 @@ async def audiobook_download_url(job_id: str, type: str = "m4b",
 async def audiobook_job_download(request: Request, job_id: str, type: str = "m4b",
                                  name: Optional[str] = None,
                                  token: Optional[str] = None):
-    if type == "epub":
+    if type in ("epub", "m4b_part"):
         if not name:
-            raise HTTPException(400, "name= required for type=epub")
-        scope = f"audiobook:{job_id}:epub:{name}"
+            raise HTTPException(400, "name= required")
+        scope = f"audiobook:{job_id}:{type}:{name}"
     elif type == "epubs_zip":
         scope = f"audiobook:{job_id}:epubs_zip"
     else:
@@ -3087,11 +3093,15 @@ async def audiobook_job_download(request: Request, job_id: str, type: str = "m4b
     data = _read_audiobook_status(job_id) or {}
     job_dir = AUDIOBOOK_JOBS_DIR / job_id
     if type == "epub":
-        epubs = data.get("epubs") or []
-        if not any(e.get("name") == name for e in epubs):
+        if not any(e.get("name") == name for e in data.get("epubs") or []):
             raise HTTPException(404, f"epub {name!r} not in this job")
         p = job_dir / "epub3" / name
         media = "application/epub+zip"
+    elif type == "m4b_part":
+        if not any(m.get("name") == name for m in data.get("m4bs") or []):
+            raise HTTPException(404, f"m4b part {name!r} not in this job")
+        p = job_dir / "epub3" / name
+        media = "audio/mp4"
     elif type == "epubs_zip":
         zname = data.get("epubs_zip_name")
         if not zname:
@@ -3108,7 +3118,7 @@ async def audiobook_job_download(request: Request, job_id: str, type: str = "m4b
         if not p.exists():
             raise HTTPException(404, "summary not available")
         media = "text/markdown"
-    else:  # m4b
+    else:  # m4b (legacy whole-book M4B)
         m4b_name = data.get("m4b_name")
         if not m4b_name: raise HTTPException(404, "m4b not ready")
         p = job_dir / m4b_name

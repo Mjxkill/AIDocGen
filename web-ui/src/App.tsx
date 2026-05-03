@@ -1454,6 +1454,7 @@ interface AudiobookJob {
   m4b_name?: string; m4b_size?: number;
   zip_name?: string; zip_size?: number;
   epubs?: { name: string; size: number; title: string }[];
+  m4bs?: { name: string; size: number; title: string }[];
   epubs_zip_name?: string; epubs_zip_size?: number;
   chapters_count?: number;
   duration_seconds?: number;
@@ -1550,6 +1551,11 @@ const AudiobookTools = () => {
   const downloadEpub = (job: AudiobookJob, name: string) => {
     nativeDownload(
       `/v1/audiobook/jobs/${job.job_id}/download-url?type=epub&name=${encodeURIComponent(name)}`
+    );
+  };
+  const downloadM4bPart = (job: AudiobookJob, name: string) => {
+    nativeDownload(
+      `/v1/audiobook/jobs/${job.job_id}/download-url?type=m4b_part&name=${encodeURIComponent(name)}`
     );
   };
 
@@ -1698,21 +1704,33 @@ const AudiobookTools = () => {
                     <>
                       {job.epubs && job.epubs.length > 0 ? (
                         <>
-                          {job.epubs.map((e, k) => (
-                            <button key={e.name}
-                                    className="btn-sm btn-primary"
-                                    style={{width: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', textAlign: 'left'}}
-                                    title={`${e.title} (${fmtSize(e.size)}) — EPUB3 with text + audio + SMIL sync`}
-                                    onClick={() => downloadEpub(job, e.name)}>
-                              📖 {k + 1}. {e.title}
-                            </button>
-                          ))}
+                          {job.epubs.map((e, k) => {
+                            const m4b = (job.m4bs || []).find(m => m.title === e.title);
+                            return (
+                              <div key={e.name} style={{display: 'inline-flex', gap: 4}}>
+                                <button className="btn-sm btn-primary"
+                                        style={{width: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', textAlign: 'left'}}
+                                        title={`${e.title} (${fmtSize(e.size)}) — EPUB3 with text + audio + SMIL sync (Thorium / Voice Dream / etc.)`}
+                                        onClick={() => downloadEpub(job, e.name)}>
+                                  📖 {k + 1}. {e.title}
+                                </button>
+                                {m4b && (
+                                  <button className="btn-sm btn-outline"
+                                          style={{width: 50}}
+                                          title={`${m4b.title} M4B (${fmtSize(m4b.size)}) — playable in Apple Books`}
+                                          onClick={() => downloadM4bPart(job, m4b.name)}>
+                                    🎧
+                                  </button>
+                                )}
+                              </div>
+                            );
+                          })}
                           {job.epubs_zip_name && (
                             <button className="btn-sm btn-outline"
                                     style={{width: 220}}
-                                    title={`All ${job.epubs.length} EPUB3 in one ZIP (${fmtSize(job.epubs_zip_size)})`}
+                                    title={`Bundle ZIP: ${job.epubs.length} EPUB3 + ${(job.m4bs || []).length} M4B (${fmtSize(job.epubs_zip_size)})`}
                                     onClick={() => download(job, 'epubs_zip')}>
-                              📦 ZIP all ({job.epubs.length})
+                              📦 ZIP all ({job.epubs.length}+{(job.m4bs || []).length})
                             </button>
                           )}
                         </>
