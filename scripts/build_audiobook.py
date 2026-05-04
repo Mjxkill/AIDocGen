@@ -374,8 +374,9 @@ SUMMARY_PROMPT = (
     "The goal is NOT to shorten — keep ALL the technical detail, every concept, "
     "every named entity. Just rewrite so it sounds natural when listened to.\n\n"
     "STRICT FORMATTING RULES (these override anything else):\n"
-    "1. Reproduce every `# ` / `## ` / `### ` / `#### ` header VERBATIM, including "
-    "any leading numbering like `## 2.`, `### 2.1`, `### 4.1.3` — keep the numbers.\n"
+    "1. NEVER write a markdown heading line (no `# `, `## `, `### `, `#### `). "
+    "The orchestrator handles headings outside the LLM call and will reject any "
+    "heading you emit. Output only prose paragraphs.\n"
     "2. Use the same language as the source. If the source is French, output is French.\n"
     "3. Output the SAME LENGTH as the input — this is a transformation, not a summary.\n\n"
     "Content rules:\n"
@@ -392,11 +393,37 @@ SUMMARY_PROMPT = (
     "- URLs → drop or replace with \"the official documentation\".\n"
     "- Cross-references like \"see Figure 3\" → integrate naturally.\n\n"
     "Output format:\n"
-    "- Output ONLY the adapted Markdown content.\n"
+    "- Output ONLY the adapted prose content (no headings).\n"
     "- No preamble (do NOT start with \"Voici…\", \"Here is…\", \"Sure…\").\n"
     "- No closing remarks.\n"
     "- No explanation of what you did.\n"
 )
+
+
+def _extract_leading_headings(atom: str) -> tuple[str, str]:
+    """Return (headings_block, body) from a markdown atom.
+
+    All `^#{1,6}\\s+` lines at the very start of the atom (with any blank
+    lines between them) are captured into `headings_block` verbatim. The
+    rest is the body sent to the LLM. The orchestrator re-prepends the
+    headings on the LLM output, guaranteeing titles can never be rewritten."""
+    lines = atom.splitlines(keepends=True)
+    i = 0
+    last_heading = -1
+    while i < len(lines):
+        s = lines[i]
+        if re.match(r"^#{1,6}\s+", s):
+            last_heading = i
+            i += 1
+        elif s.strip() == "":
+            i += 1
+        else:
+            break
+    if last_heading < 0:
+        return "", atom.strip()
+    headings_block = "".join(lines[:last_heading + 1]).rstrip("\n")
+    body = "".join(lines[last_heading + 1:]).strip()
+    return headings_block, body
 
 
 # ── Adaptation chunking ──────────────────────────────────────────────────────
@@ -717,18 +744,35 @@ def summarize_via_ollama(md: str, model: str, base_url: str, api_key: str,
             print(f"[adapt] {idx+1}/{len(tagged)}: cached", flush=True)
             _write_adapt_progress(idx + 1)
             continue
-        out = _llm_call({
-            "model": model, "stream": False, "think": False,
-            "options": {"num_predict": 64000},
-            "messages": [
-                {"role": "system", "content": sys_template},
-                {"role": "user", "content": content},
-            ],
-        }, base_url, api_key, schema=schema)
-        cache_file.write_text(out, encoding="utf-8")
-        out_parts.append(out.strip())
-        print(f"[adapt] {idx+1}/{len(tagged)}: {len(content)}→{len(out)} chars "
-              f"({len(out)/max(1,len(content))*100:.0f}%)", flush=True)
+        # Pull leading headings out of the LLM call so they can never be
+        # rewritten. They're re-prepended verbatim to the LLM output.
+        headings, body = _extract_leading_headings(content)
+        if not body:
+            # Heading-only atom (no prose to adapt) — keep verbatim
+            adapted = headings
+            print(f"[adapt] {idx+1}/{len(tagged)}: heading-only "
+                  f"({len(headings)} chars)", flush=True)
+        else:
+            out = _llm_call({
+                "model": model, "stream": False, "think": False,
+                "options": {"num_predict": 64000},
+                "messages": [
+                    {"role": "system", "content": sys_template},
+                    {"role": "user", "content": body},
+                ],
+            }, base_url, api_key, schema=schema)
+            # Belt-and-braces: strip any heading line the LLM might have
+            # emitted despite the prompt rule (rare, but happens).
+            cleaned = "\n".join(
+                ln for ln in out.splitlines()
+                if not re.match(r"^#{1,6}\s+", ln.strip())
+            ).strip()
+            adapted = (headings + "\n\n" + cleaned) if headings else cleaned
+            print(f"[adapt] {idx+1}/{len(tagged)}: "
+                  f"{len(body)}→{len(cleaned)} chars body "
+                  f"({len(cleaned)/max(1,len(body))*100:.0f}%)", flush=True)
+        cache_file.write_text(adapted, encoding="utf-8")
+        out_parts.append(adapted.strip())
         _write_adapt_progress(idx + 1)
     return "\n\n".join(p for p in out_parts if p)
 
