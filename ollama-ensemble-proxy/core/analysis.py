@@ -47,7 +47,11 @@ class Analyst:
                 "title": s.get("title", ""),
                 "domain": s.get("domain", ""),
                 "content_preview": content_preview[:1500],
+                "published_at": s.get("published_at", ""),
             })
+
+        # Index full source records so we can apply recency-boost after LLM ranking
+        source_meta = {s["source_id"]: s for s in sources}
 
         # Batch processing with real LLM scoring
         batch_size = 10
@@ -122,6 +126,24 @@ class Analyst:
                 # Graceful fallback: assign neutral scores
                 for s in batch:
                     ranked_results.append({"source_id": s["source_id"], "score": 0.5})
+
+        # ── Recency boost ──
+        # Mix the LLM score with a recency multiplier so fresh sources
+        # surface near the top, but never demote a high-quality stale
+        # source below an irrelevant fresh one. Boost weight is a config knob.
+        rec_days = getattr(self.config, "recency_days", 0)
+        rec_boost = max(0.0, min(1.0, getattr(self.config, "recency_boost", 0.5)))
+        if rec_days > 0 and rec_boost > 0:
+            from .research import _parse_published_date, _recency_score
+            for r in ranked_results:
+                meta = source_meta.get(r["source_id"], {})
+                published = _parse_published_date(meta.get("published_at"))
+                rec = _recency_score(published, rec_days)
+                base = r.get("score", 0.5)
+                # blended = (1-w)*base + w * (base * rec)
+                # → keeps stale-but-good sources visible, and pulls fresh ones up.
+                r["recency"] = round(rec, 3)
+                r["score"] = round(base * (1 - rec_boost) + base * rec * rec_boost, 3)
 
         # Sort by score descending
         ranked_results.sort(key=lambda x: x.get("score", 0), reverse=True)
@@ -236,6 +258,7 @@ class Analyst:
         llm_logs: list[dict[str, Any]],
         progress_cb: Callable | None,
         run_dir: Path | None,
+        sources: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         # Verification with Checkpointing (Partial Save)
         verdicts = []
@@ -249,20 +272,79 @@ class Analyst:
         processed = len(verdicts)
         to_verify = claims[processed:]
 
+        # Build source content cache so the judge sees the actual passage
+        source_lookup: dict[str, dict[str, Any]] = {}
+        if sources:
+            for s in sources:
+                source_lookup[s["source_id"]] = s
+
+        def _source_passage(source_id: str, claim_text: str, max_chars: int = 3000) -> str:
+            """Return a relevant slice of the source content. We try to find
+            the passage that mentions one of the claim's distinctive nouns;
+            fallback to the head of the document."""
+            s = source_lookup.get(source_id)
+            if not s or not run_dir:
+                return ""
+            content_path = run_dir / s.get("content_path", "")
+            if not content_path.exists():
+                return ""
+            try:
+                full = content_path.read_text(encoding="utf-8", errors="ignore")
+            except Exception:
+                return ""
+            if len(full) <= max_chars:
+                return full
+            tokens = [t for t in re.findall(r"[A-Za-zÀ-ÿ\d]{4,}", claim_text or "")][:6]
+            for tok in tokens:
+                idx = full.lower().find(tok.lower())
+                if idx >= 0:
+                    start = max(0, idx - max_chars // 3)
+                    return full[start:start + max_chars]
+            return full[:max_chars]
+
         semaphore = asyncio.Semaphore(self.config.max_parallel_llm)
 
         async def verify_one(claim: dict[str, Any]):
             async with semaphore:
                 claim_text = claim.get("claim_text") or claim.get("claim_product_image") or str(claim)
-                system = (
-                    f"You are a factual judge. {_date_instruction()}\n"
-                    f"Verify the following claim. Consider:\n"
-                    f"- Is it factually accurate based on your knowledge?\n"
-                    f"- Is it verifiable or just opinion?\n"
-                    f"- Is it up to date?\n"
-                    f"Return JSON: {{\"status\": \"ACCEPTED|REJECTED|UNCERTAIN\", \"justification\": \"...\", \"confidence\": 0.0-1.0}}"
-                )
-                prompt = f"Claim to verify: {claim_text}"
+                source_id = claim.get("source_id", "")
+                passage = _source_passage(source_id, str(claim_text))
+                source_meta = source_lookup.get(source_id, {})
+                src_url = source_meta.get("url", "")
+                src_title = source_meta.get("title", "")
+                src_published = source_meta.get("published_at", "")
+
+                if passage:
+                    system = (
+                        f"You are a factual judge. {_date_instruction()}\n"
+                        f"You receive a CLAIM and the SOURCE PASSAGE it was extracted from.\n"
+                        f"Verify whether the SOURCE PASSAGE actually supports the CLAIM.\n"
+                        f"Status rules:\n"
+                        f"- ACCEPTED: the passage clearly states or strongly implies the claim.\n"
+                        f"- REJECTED: the passage contradicts the claim, OR the passage does not "
+                        f"contain the claim's information at all (claim was hallucinated by extractor).\n"
+                        f"- UNCERTAIN: the passage is ambiguous, partial, or only loosely related.\n"
+                        f"Do NOT rely on your own outside knowledge — judge against the passage.\n"
+                        f"Return JSON: {{\"status\": \"ACCEPTED|REJECTED|UNCERTAIN\", \"justification\": \"...\", \"confidence\": 0.0-1.0}}"
+                    )
+                    prompt = (
+                        f"CLAIM:\n{claim_text}\n\n"
+                        f"SOURCE: {src_title}\n"
+                        f"URL: {src_url}\n"
+                        f"PUBLISHED: {src_published}\n\n"
+                        f"SOURCE PASSAGE:\n{passage}"
+                    )
+                else:
+                    # No source passage available — fall back to knowledge-based check
+                    system = (
+                        f"You are a factual judge. {_date_instruction()}\n"
+                        f"Verify the following claim. Consider:\n"
+                        f"- Is it factually accurate based on your knowledge?\n"
+                        f"- Is it verifiable or just opinion?\n"
+                        f"- Is it up to date?\n"
+                        f"Return JSON: {{\"status\": \"ACCEPTED|REJECTED|UNCERTAIN\", \"justification\": \"...\", \"confidence\": 0.0-1.0}}"
+                    )
+                    prompt = f"Claim to verify: {claim_text}"
                 try:
                     resp = await self.llm.ask(self.config.verify_model, system, prompt, llm_logs, "verification")
                     data = await self.llm.parse_json(resp, self.config.verify_model, "verification", llm_logs)
@@ -271,9 +353,12 @@ class Analyst:
                         "status": data.get("status", "UNCERTAIN"),
                         "justification": data.get("justification", "No justification provided."),
                         "confidence": data.get("confidence", 0.5),
+                        "source_grounded": bool(passage),
                     }
                 except Exception:
-                    return {"claim_id": claim["claim_id"], "status": "UNCERTAIN", "justification": "Error during verification."}
+                    return {"claim_id": claim["claim_id"], "status": "UNCERTAIN",
+                            "justification": "Error during verification.",
+                            "source_grounded": bool(passage)}
 
         # Process in small batches to allow checkpointing
         batch_size = 5

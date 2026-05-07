@@ -25,6 +25,7 @@ from pydantic import BaseModel, ConfigDict
 
 from core.config import DossierConfig
 from core.engine import DossierEngine
+from core.research import set_dossier_context
 from core.auth import get_current_user, get_admin_user, create_access_token, verify_password, get_password_hash, _get_users, _save_users, ACCESS_TOKEN_EXPIRE_MINUTES, create_download_token, verify_download_token
 from core.logging_config import configure_logging, get_logger
 from core import audit, cost, notify
@@ -108,6 +109,13 @@ def _get_engine(ollama_url: str = None, models: dict = None):
         if models.get("judge_model"): config.judge_model = models["judge_model"]
         if models.get("coder_model"): config.planner_book_model_4_json = models["coder_model"]
         if models.get("extract_model"): config.extract_model = models["extract_model"]
+        # Per-run recency override (UI toggle)
+        rd = models.get("recency_days")
+        if rd is not None:
+            try:
+                config.recency_days = max(0, int(rd))
+            except (ValueError, TypeError):
+                pass
     return DossierEngine(config)
 
 def _get_gpu_usage():
@@ -220,6 +228,7 @@ class RunRequest(BaseModel):
     extract_model: Optional[str] = None
     include_images: Optional[bool] = True
     generate_ai_images: Optional[bool] = False
+    recency_days: Optional[int] = None  # 0 = no filter, 30/180/365 = boost recent
 
 # --- AUTH API ---
 @app.post("/v1/auth/login")
@@ -628,11 +637,13 @@ async def start_run(request: Request, req: RunRequest, user: dict = Depends(get_
         "coder_model": req.coder_model, "extract_model": req.extract_model,
         "include_images": bool(req.include_images),
         "generate_ai_images": bool(req.generate_ai_images),
+        "recency_days": req.recency_days if req.recency_days is not None else None,
         "owner_id": user["id"], "owner_name": user["username"],
         "events": [{"timestamp": int(time.time()), "stage": "init", "message": "Démarrage..."}],
         "updated_at": int(time.time())
     }
     (run_dir / "status.json").write_text(json.dumps(status_data))
+    set_dossier_context(user["id"], user["username"], run_id)
     _DOSSIER_TASKS[run_id] = asyncio.create_task(engine.run(
         run_id, req.question, req.prompt_type, req.detail_level,
         language=req.language, coder_model=req.coder_model, tags=tags,
@@ -881,6 +892,7 @@ async def reset_run(run_id: str, user: dict = Depends(get_current_user)):
     (run_dir / "status.json").write_text(json.dumps(d))
     engine = _get_engine(d.get("ollama_url"), d)
     tags = d.get("tags", [])
+    set_dossier_context(d.get("owner_id"), d.get("owner_name"), run_id)
     _DOSSIER_TASKS[run_id] = asyncio.create_task(engine.run(run_id, d["question"], resume=False, language=d.get("language", "fr"), coder_model=d.get("coder_model"), tags=tags, include_images=bool(d.get("include_images", True)), generate_ai_images=bool(d.get("generate_ai_images", False))))
     _attach_notify(_DOSSIER_TASKS[run_id], kind="dossier", job_id=run_id,
                    status_reader=_read_dossier_status)
@@ -909,6 +921,7 @@ async def resume_run(run_id: str, user: dict = Depends(get_current_user)):
     status_path.write_text(json.dumps(d))
     engine = _get_engine(d.get("ollama_url"), d)
     tags = d.get("tags", [])
+    set_dossier_context(d.get("owner_id"), d.get("owner_name"), run_id)
     _DOSSIER_TASKS[run_id] = asyncio.create_task(engine.run(run_id, d["question"], resume=True, language=d.get("language", "fr"), coder_model=d.get("coder_model"), tags=tags, include_images=bool(d.get("include_images", True)), generate_ai_images=bool(d.get("generate_ai_images", False))))
     _attach_notify(_DOSSIER_TASKS[run_id], kind="dossier", job_id=run_id,
                    status_reader=_read_dossier_status)
@@ -922,6 +935,7 @@ async def approve_run(run_id: str, user: dict = Depends(get_current_user)):
     d = json.loads((run_dir / "status.json").read_text())
     engine = _get_engine(d.get("ollama_url"), d)
     tags = d.get("tags", [])
+    set_dossier_context(d.get("owner_id"), d.get("owner_name"), run_id)
     _DOSSIER_TASKS[run_id] = asyncio.create_task(engine.run(run_id, d["question"], resume=True, language=d.get("language", "fr"), coder_model=d.get("coder_model"), tags=tags, include_images=bool(d.get("include_images", True)), generate_ai_images=bool(d.get("generate_ai_images", False))))
     _attach_notify(_DOSSIER_TASKS[run_id], kind="dossier", job_id=run_id,
                    status_reader=_read_dossier_status)

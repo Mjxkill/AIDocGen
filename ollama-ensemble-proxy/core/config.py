@@ -62,6 +62,13 @@ class DossierConfig:
     firecrawl_api_key: str | None
     firecrawl_crawl_max_pages: int
     firecrawl_extract_enabled: bool
+    firecrawl_deep_crawl_top_n: int
+    firecrawl_extract_top_n: int
+    tavily_api_key: str | None
+    arxiv_enabled: bool
+    pubmed_enabled: bool
+    recency_days: int  # 0 = no filter; 365 = 1 year, etc.
+    recency_boost: float  # how much to boost recent sources in shortlist (0.0-1.0)
     writer_enable_critique: bool
     coherence_embed_model: str
 
@@ -124,8 +131,15 @@ class DossierConfig:
             web_search_engine=os.getenv("ENSEMBLE_WEB_SEARCH_ENGINE", "auto").strip().lower(),
             web_request_delay=float(os.getenv("ENSEMBLE_WEB_REQUEST_DELAY", "3.0")),
             firecrawl_api_key=os.getenv("FIRECRAWL_API_KEY"),
-            firecrawl_crawl_max_pages=int(os.getenv("FIRECRAWL_CRAWL_MAX_PAGES", "10")),
+            firecrawl_crawl_max_pages=int(os.getenv("FIRECRAWL_CRAWL_MAX_PAGES", "50")),
             firecrawl_extract_enabled=env_bool("FIRECRAWL_EXTRACT_ENABLED", True),
+            firecrawl_deep_crawl_top_n=int(os.getenv("FIRECRAWL_DEEP_CRAWL_TOP_N", "8")),
+            firecrawl_extract_top_n=int(os.getenv("FIRECRAWL_EXTRACT_TOP_N", "20")),
+            tavily_api_key=os.getenv("TAVILY_API_KEY"),
+            arxiv_enabled=env_bool("ARXIV_ENABLED", True),
+            pubmed_enabled=env_bool("PUBMED_ENABLED", True),
+            recency_days=int(os.getenv("ENSEMBLE_DOSSIER_RECENCY_DAYS", "365")),
+            recency_boost=float(os.getenv("ENSEMBLE_DOSSIER_RECENCY_BOOST", "0.5")),
             writer_enable_critique=env_bool("ENSEMBLE_DOSSIER_WRITER_CRITIQUE", True),
             coherence_embed_model=os.getenv("ENSEMBLE_DOSSIER_COHERENCE_EMBED_MODEL", "mxbai-embed-large"),
         )

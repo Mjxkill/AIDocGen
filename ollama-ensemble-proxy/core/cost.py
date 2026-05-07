@@ -23,11 +23,17 @@ TARIFFS: dict[tuple[str, str, str], float] = {
     ("deepseek", "deepseek-v4-pro",   "input_token"):  0.55e-6,
     ("deepseek", "deepseek-v4-pro",   "output_token"): 2.19e-6,
 
-    # Firecrawl: ~$0.001 per credit; one scrape = 1 credit, one crawl page ≈ 1 credit
+    # Firecrawl: ~$0.001 per credit
     ("firecrawl", "scrape", "credit"): 0.001,
     ("firecrawl", "crawl",  "credit"): 0.001,
-    ("firecrawl", "agent",  "credit"): 0.005,  # agent calls cost more
+    ("firecrawl", "agent",  "credit"): 0.005,
     ("firecrawl", "parse",  "credit"): 0.001,
+    ("firecrawl", "search", "credit"): 0.005,
+    ("firecrawl", "map",    "credit"): 0.001,
+    ("firecrawl", "extract","credit"): 0.001,
+
+    # Tavily: $0.005 per advanced search query
+    ("tavily", "search", "credit"): 0.005,
 
     # OpenAI TTS
     ("openai", "gpt-4o-mini-tts", "char"): 15.0e-6,  # $15 per 1M chars

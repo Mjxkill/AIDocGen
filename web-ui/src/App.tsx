@@ -2248,6 +2248,8 @@ export default function App() {
   const [tags, setTags] = useState('');
   const [includeImages, setIncludeImages] = useState(true);
   const [aiImages, setAiImages] = useState(false);
+  // Recency window (days). 0 = no filter; 365 default = boost last 12 months.
+  const [recencyDays, setRecencyDays] = useState<number>(365);
   const [prompts, setPrompts] = useState<string[]>([]);
   const [metrics, setMetrics] = useState<Metrics|null>(null);
   const [detailId, setDetailId] = useState<string|null>(null);
@@ -2359,6 +2361,7 @@ export default function App() {
       ollama_url: srv[sIdx]?.url || 'https://ollama.com',
       planner_model: sel.p, writer_model: sel.w, judge_model: sel.j, coder_model: sel.c, extract_model: sel.e, tags,
       include_images: includeImages, generate_ai_images: aiImages,
+      recency_days: recencyDays,
     }).then(() => { setQ(''); setTags(''); });
   };
 
@@ -2431,6 +2434,16 @@ export default function App() {
               <label style={{display:'flex', gap:6, alignItems:'center', fontSize:12, color:'var(--text-secondary)'}} title="Generate an AI image for sections without a corpus image. Requires IMAGE_GEN_API_KEY in env (Replicate Flux Schnell by default; OpenAI gpt-image-1 if IMAGE_GEN_PROVIDER=openai). Costs credits.">
                 <input type="checkbox" checked={aiImages} onChange={e=>setAiImages(e.target.checked)} />
                 Génération IA en complément
+              </label>
+              <label style={{display:'flex', gap:6, alignItems:'center', fontSize:12, color:'var(--text-secondary)'}} title="Soft recency filter: sources newer than this window are boosted in the shortlist; older ones can still appear if highly relevant.">
+                Actualité&nbsp;:
+                <select value={recencyDays} onChange={e=>setRecencyDays(parseInt(e.target.value))}>
+                  <option value="180">6 mois</option>
+                  <option value="365">12 mois</option>
+                  <option value="730">2 ans</option>
+                  <option value="1825">5 ans</option>
+                  <option value="0">Aucun filtre</option>
+                </select>
               </label>
             </div>
           </section>

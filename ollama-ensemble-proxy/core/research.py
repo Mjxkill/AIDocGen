@@ -1,9 +1,10 @@
 import asyncio
 import hashlib
+import os
 import time
 import re
 from collections import Counter
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlparse
@@ -13,8 +14,91 @@ from duckduckgo_search import DDGS
 from .config import DossierConfig
 from .utils import canonicalize_url, emit_progress
 from .logging_config import get_logger
+from . import cost as _cost
 
 log = get_logger("aidocgen.research")
+
+
+_BASE_DIR = Path(__file__).parent.parent.resolve()
+
+# contextvars carry per-run identity (user, run_id) into the cost recorder
+# without having to thread parameters through every function. Set by
+# app.py around the `engine.run(...)` call.
+import contextvars as _ctxvars
+_ctx_user_id: _ctxvars.ContextVar[str | None] = _ctxvars.ContextVar("user_id", default=None)
+_ctx_user_name: _ctxvars.ContextVar[str | None] = _ctxvars.ContextVar("user_name", default=None)
+_ctx_run_id: _ctxvars.ContextVar[str | None] = _ctxvars.ContextVar("run_id", default=None)
+
+
+def set_dossier_context(user_id: str | None, user_name: str | None,
+                        run_id: str | None) -> None:
+    _ctx_user_id.set(user_id or None)
+    _ctx_user_name.set(user_name or None)
+    _ctx_run_id.set(run_id or None)
+
+
+def _record_cost(provider: str, model: str, kind: str, units: float,
+                 user_id: str | None = None, user_name: str | None = None,
+                 job_id: str | None = None) -> None:
+    """Best-effort cost record for each external API call."""
+    try:
+        _cost.record(_BASE_DIR / "data",
+                     provider=provider, model=model, kind=kind, units=units,
+                     user_id=user_id or _ctx_user_id.get(),
+                     user_name=user_name or _ctx_user_name.get(),
+                     job_id=job_id or _ctx_run_id.get())
+    except Exception as e:
+        log.debug("cost record failed", extra={"error": str(e)})
+
+
+_DATE_PATTERNS = [
+    # ISO-ish: 2026-05-04, 2025-12-31
+    re.compile(r"\b(20\d{2})[-/](\d{1,2})[-/](\d{1,2})\b"),
+    # Natural: "May 2026", "mai 2026"
+    re.compile(
+        r"\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|"
+        r"jan|fév|mar|avr|mai|juin|juil|aou|sep|oct|nov|déc)[a-zéû]*\s+(20\d{2})\b",
+        re.IGNORECASE,
+    ),
+    # Bare year: 2026
+    re.compile(r"\b(20\d{2})\b"),
+]
+
+
+def _parse_published_date(s: str | None) -> datetime | None:
+    """Parse ISO 8601 datetime or 'YYYY-MM-DD' string. Returns None if not parseable."""
+    if not s:
+        return None
+    s = s.strip()
+    for fmt in ("%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%SZ",
+                "%Y-%m-%d", "%Y-%m-%dT%H:%M:%S.%fZ"):
+        try:
+            dt = datetime.strptime(s.replace("Z", "+0000") if fmt.endswith("%z") else s, fmt)
+            return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
+        except ValueError:
+            continue
+    # Last resort: extract year
+    m = re.search(r"\b(20\d{2})\b", s)
+    if m:
+        try:
+            return datetime(int(m.group(1)), 6, 15, tzinfo=timezone.utc)
+        except ValueError:
+            pass
+    return None
+
+
+def _recency_score(published: datetime | None, recency_days: int) -> float:
+    """Returns 1.0 if within recency_days, decays linearly to 0.0 at 4× recency_days."""
+    if not published or recency_days <= 0:
+        return 0.5
+    age_days = (datetime.now(timezone.utc) - published).days
+    if age_days < 0:
+        return 1.0
+    if age_days <= recency_days:
+        return 1.0
+    if age_days >= 4 * recency_days:
+        return 0.0
+    return max(0.0, 1.0 - (age_days - recency_days) / (3 * recency_days))
 
 class WebResearcher:
     def __init__(self, config: DossierConfig):
@@ -69,6 +153,7 @@ class WebResearcher:
             async with httpx.AsyncClient(timeout=30.0) as client:
                 resp = await client.post(fc_url, json=payload, headers=headers)
                 if resp.status_code == 200:
+                    _record_cost("firecrawl", "map", "credit", 1)
                     data = resp.json()
                     return data.get("links", [])[:limit]
         except Exception as e:
@@ -117,6 +202,8 @@ class WebResearcher:
                                 "markdown": item.get("markdown", ""),
                                 "title": item.get("metadata", {}).get("title", ""),
                             })
+                        if pages:
+                            _record_cost("firecrawl", "crawl", "credit", len(pages))
                         return pages
                     elif status in ("failed", "cancelled"):
                         return []
@@ -141,6 +228,7 @@ class WebResearcher:
                 if resp.status_code == 200:
                     data = resp.json()
                     if data.get("success"):
+                        _record_cost("firecrawl", "extract", "credit", 5)
                         return data.get("data", {})
         except Exception as e:
             log.warning("Firecrawl /extract error for", extra={"url": url, "error": str(e)})
@@ -237,6 +325,206 @@ class WebResearcher:
             pass
         return links
 
+    async def _search_firecrawl(self, query: str, tags: list[str] = None) -> list[dict[str, str]]:
+        """Firecrawl /v1/search — high-quality LLM-friendly search results.
+        Honors recency_days as Google `tbs=qdr:d/w/m/y` filter."""
+        if not self.config.firecrawl_api_key:
+            return []
+        rd = self.config.recency_days
+        tbs = None
+        if rd > 0:
+            tbs = "qdr:y" if rd > 90 else "qdr:m" if rd > 7 else "qdr:w"
+        payload: dict[str, Any] = {
+            "query": query,
+            "limit": min(20, self.config.web_per_query_results),
+            "lang": "fr",
+        }
+        if tbs:
+            payload["tbs"] = tbs
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(
+                    "https://api.firecrawl.dev/v1/search",
+                    json=payload,
+                    headers={"Authorization": f"Bearer {self.config.firecrawl_api_key}"},
+                )
+                if resp.status_code != 200:
+                    log.warning("Firecrawl /search non-200",
+                                extra={"status": resp.status_code, "query": query[:60]})
+                    return []
+                data = resp.json()
+                _record_cost("firecrawl", "search", "credit", 1)
+                results = data.get("data", []) if isinstance(data.get("data"), list) else data.get("results", [])
+                links = []
+                for r in results:
+                    title = r.get("title", "") or r.get("name", "")
+                    snippet = r.get("description", "") or r.get("snippet", "") or r.get("content", "")
+                    url = r.get("url", "") or r.get("link", "")
+                    if not url:
+                        continue
+                    if tags and not self._filter_by_tags(f"{title} {snippet}", tags):
+                        continue
+                    links.append({
+                        "title": title, "url": url, "snippet": snippet,
+                        "engine": "firecrawl_search",
+                        "published_at": r.get("publishedDate") or r.get("date") or "",
+                    })
+                return links
+        except Exception as e:
+            log.warning("Firecrawl /search error", extra={"error": str(e), "query": query[:60]})
+            return []
+
+    async def _search_tavily(self, query: str, tags: list[str] = None) -> list[dict[str, str]]:
+        """Tavily — search optimised for LLM context. Has native `days` recency."""
+        if not self.config.tavily_api_key:
+            return []
+        payload: dict[str, Any] = {
+            "api_key": self.config.tavily_api_key,
+            "query": query,
+            "max_results": min(20, self.config.web_per_query_results),
+            "search_depth": "advanced",
+            "include_answer": False,
+            "include_raw_content": False,
+        }
+        if self.config.recency_days > 0:
+            payload["days"] = self.config.recency_days
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post("https://api.tavily.com/search", json=payload)
+                if resp.status_code != 200:
+                    log.warning("Tavily non-200",
+                                extra={"status": resp.status_code, "query": query[:60]})
+                    return []
+                data = resp.json()
+                _record_cost("tavily", "search", "credit", 1)
+                links = []
+                for r in data.get("results", []):
+                    title = r.get("title", "")
+                    snippet = r.get("content", "") or r.get("snippet", "")
+                    url = r.get("url", "")
+                    if not url:
+                        continue
+                    if tags and not self._filter_by_tags(f"{title} {snippet}", tags):
+                        continue
+                    links.append({
+                        "title": title, "url": url, "snippet": snippet,
+                        "engine": "tavily",
+                        "published_at": r.get("published_date") or "",
+                    })
+                return links
+        except Exception as e:
+            log.warning("Tavily error", extra={"error": str(e), "query": query[:60]})
+            return []
+
+    async def _search_arxiv(self, query: str, tags: list[str] = None) -> list[dict[str, str]]:
+        """arXiv — academic papers. No API key needed. Filters by submitted_date.
+        arXiv often returns 503 under load; retry once after a short backoff."""
+        if not self.config.arxiv_enabled:
+            return []
+        params: dict[str, Any] = {
+            "search_query": f"all:{query}",
+            "start": 0,
+            "max_results": 10,
+            "sortBy": "submittedDate",
+            "sortOrder": "descending",
+        }
+        try:
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                resp = await client.get("https://export.arxiv.org/api/query", params=params)
+                if resp.status_code == 503:
+                    await asyncio.sleep(3)
+                    resp = await client.get("https://export.arxiv.org/api/query", params=params)
+                if resp.status_code != 200:
+                    return []
+                # Parse Atom XML loosely
+                xml = resp.text
+                entries = re.split(r"<entry>", xml)[1:]
+                cutoff = None
+                if self.config.recency_days > 0:
+                    cutoff = datetime.now(timezone.utc) - timedelta(days=self.config.recency_days)
+                links = []
+                for e in entries:
+                    title_m = re.search(r"<title>([\s\S]*?)</title>", e)
+                    summary_m = re.search(r"<summary>([\s\S]*?)</summary>", e)
+                    link_m = re.search(r'<link[^>]+href="(http[^"]*?abs/[^"]*)"', e)
+                    pub_m = re.search(r"<published>([^<]+)</published>", e)
+                    if not title_m or not link_m:
+                        continue
+                    title = re.sub(r"\s+", " ", title_m.group(1)).strip()
+                    snippet = re.sub(r"\s+", " ", (summary_m.group(1) if summary_m else "")).strip()[:400]
+                    url = link_m.group(1).strip()
+                    pub = pub_m.group(1).strip() if pub_m else ""
+                    if cutoff and pub:
+                        dt = _parse_published_date(pub)
+                        if dt and dt < cutoff:
+                            continue
+                    if tags and not self._filter_by_tags(f"{title} {snippet}", tags):
+                        continue
+                    links.append({
+                        "title": f"[arXiv] {title}", "url": url, "snippet": snippet,
+                        "engine": "arxiv", "published_at": pub,
+                    })
+                return links
+        except Exception as e:
+            log.warning("arXiv error", extra={"error": str(e), "query": query[:60]})
+            return []
+
+    async def _search_pubmed(self, query: str, tags: list[str] = None) -> list[dict[str, str]]:
+        """PubMed — biomedical literature via NCBI E-utilities (no key needed)."""
+        if not self.config.pubmed_enabled:
+            return []
+        try:
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                params: dict[str, Any] = {
+                    "db": "pubmed", "term": query, "retmode": "json",
+                    "retmax": 10, "sort": "pub_date",
+                }
+                if self.config.recency_days > 0:
+                    end = datetime.now(timezone.utc).date()
+                    start = end - timedelta(days=self.config.recency_days)
+                    params["term"] = (
+                        f"{query} AND ({start.strftime('%Y/%m/%d')}"
+                        f"[Date - Publication] : "
+                        f"{end.strftime('%Y/%m/%d')}[Date - Publication])"
+                    )
+                resp = await client.get(
+                    "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi",
+                    params=params,
+                )
+                if resp.status_code != 200:
+                    return []
+                ids = resp.json().get("esearchresult", {}).get("idlist", [])
+                if not ids:
+                    return []
+                # Fetch summaries for these ids
+                summary_resp = await client.get(
+                    "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi",
+                    params={"db": "pubmed", "id": ",".join(ids), "retmode": "json"},
+                )
+                if summary_resp.status_code != 200:
+                    return []
+                items = summary_resp.json().get("result", {})
+                links = []
+                for pmid in ids:
+                    rec = items.get(pmid)
+                    if not rec:
+                        continue
+                    title = rec.get("title", "")
+                    pub = rec.get("pubdate", "")
+                    snippet = (rec.get("authors") or [{}])[0].get("name", "") + (
+                        f" — {pub}" if pub else "")
+                    url = f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
+                    if tags and not self._filter_by_tags(f"{title} {snippet}", tags):
+                        continue
+                    links.append({
+                        "title": f"[PubMed] {title}", "url": url, "snippet": snippet,
+                        "engine": "pubmed", "published_at": pub,
+                    })
+                return links
+        except Exception as e:
+            log.warning("PubMed error", extra={"error": str(e), "query": query[:60]})
+            return []
+
     async def _search_firecrawl_discover(self, query: str, tags: list[str] = None) -> list[dict[str, str]]:
         """Use Firecrawl /map on top domains from DDG to discover deeper pages."""
         if not self.config.firecrawl_api_key:
@@ -298,13 +586,18 @@ class WebResearcher:
                 await emit_progress(progress_cb, run_dir, "search", f"Searching {idx}/{total_sq}: {query[:50]}...")
 
             # ── PARALLEL MULTI-ENGINE SEARCH ──
-            # Run DDG + SearxNG + Wikipedia + Firecrawl discovery concurrently
+            # Quality-first: Firecrawl /search + Tavily on every query, plus
+            # legacy engines + Wikipedia + arXiv + PubMed in parallel.
             search_tasks = [
+                self._search_firecrawl(query, tags),  # primary
+                self._search_tavily(query, tags),     # primary
                 self._search_ddg(query, tags),
                 self._search_searxng(query, tags),
                 self._search_wikipedia(query, tags),
+                self._search_arxiv(query, tags),
+                self._search_pubmed(query, tags),
             ]
-            # Add Firecrawl discovery for every 3rd query to avoid overuse
+            # Domain-discovery on every 3rd query (cheap)
             if self.config.firecrawl_api_key and idx % 3 == 1:
                 search_tasks.append(self._search_firecrawl_discover(query, tags))
 
@@ -395,8 +688,9 @@ class WebResearcher:
             if domain:
                 domain_counts[domain] += 1
 
-        # Pick top 3 domains with most hits (likely most relevant)
-        top_domains = [d for d, _ in domain_counts.most_common(3) if domain_counts[d] >= 2]
+        # Pick top N domains with most hits (likely most relevant)
+        top_n = max(3, self.config.firecrawl_deep_crawl_top_n)
+        top_domains = [d for d, _ in domain_counts.most_common(top_n) if domain_counts[d] >= 2]
         if not top_domains:
             return sources
 
@@ -456,9 +750,10 @@ class WebResearcher:
             }
         }
 
-        # Extract from first 5 sources (to save API credits)
+        # Extract from first N sources (configurable; default 20)
+        top_n = max(5, self.config.firecrawl_extract_top_n)
         extracted_count = 0
-        for source in sources[:5]:
+        for source in sources[:top_n]:
             url = source.get("url", "")
             if not url:
                 continue
@@ -553,6 +848,7 @@ class WebResearcher:
             resp = await client.post(fc_url, json=payload, headers=headers)
             if resp.status_code != 200:
                 return None
+            _record_cost("firecrawl", "scrape", "credit", 1)
 
             data = resp.json().get("data", {})
             markdown = data.get("markdown", "")
@@ -579,6 +875,21 @@ class WebResearcher:
                 if lead:
                     images = lead + [im for im in images if im["url"] != lead[0]["url"]]
 
+            # Try to extract a publication date from metadata or the markdown body.
+            published = (meta.get("article:published_time")
+                         or meta.get("og:article:published_time")
+                         or meta.get("publishedTime")
+                         or meta.get("date")
+                         or "")
+            if not published:
+                # Heuristic: scan the first 2 KB of the body for a date pattern
+                head = markdown[:2000]
+                for pat in _DATE_PATTERNS:
+                    m = pat.search(head)
+                    if m:
+                        published = m.group(0)
+                        break
+
             return {
                 "source_id": sid,
                 "url": url,
@@ -587,6 +898,7 @@ class WebResearcher:
                 "title": title,
                 "content_path": f"clean/{sid}.txt",
                 "images": images,
+                "published_at": published,
             }
 
     async def _fetch_bs4(self, url: str, final_url: str, sid: str, run_dir: Path, tags: list[str] = None) -> dict[str, Any] | None:

@@ -94,7 +94,11 @@ class DossierEngine:
 
             # 8. VERIFICATION
             await emit_progress(None, run_dir, "verdicts", f"Vérification de {len(clm['claims'])} affirmations...")
-            ver = await self._step(run_dir, "verdicts", resume, None, lambda: self.analyst.verify_claims(clm["claims"], llm_logs, None, run_dir))
+            ver = await self._step(run_dir, "verdicts", resume, None,
+                lambda: self.analyst.verify_claims(
+                    clm["claims"], llm_logs, None, run_dir,
+                    sources=cor.get("sources"),
+                ))
             # 9. WRITING (with tags for focus + incremental resume)
             await emit_progress(None, run_dir, "sections", "Rédaction des chapitres du dossier...")
             # Don't use _step for sections: write_sections handles its own resume via partial sections.json
