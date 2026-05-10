@@ -65,10 +65,21 @@ _DATE_PATTERNS = [
 ]
 
 
-def _parse_published_date(s: str | None) -> datetime | None:
-    """Parse ISO 8601 datetime or 'YYYY-MM-DD' string. Returns None if not parseable."""
+def _parse_published_date(s) -> datetime | None:
+    """Parse ISO 8601 datetime or 'YYYY-MM-DD' string. Returns None if not parseable.
+    Tolerates list/tuple inputs (Firecrawl sometimes returns list-valued meta)
+    by taking the first element."""
     if not s:
         return None
+    if isinstance(s, (list, tuple)):
+        s = next((x for x in s if x), None)
+        if not s:
+            return None
+    if not isinstance(s, str):
+        try:
+            s = str(s)
+        except Exception:
+            return None
     s = s.strip()
     for fmt in ("%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%SZ",
                 "%Y-%m-%d", "%Y-%m-%dT%H:%M:%S.%fZ"):
@@ -876,10 +887,16 @@ class WebResearcher:
                     images = lead + [im for im in images if im["url"] != lead[0]["url"]]
 
             # Try to extract a publication date from metadata or the markdown body.
-            published = (meta.get("article:published_time")
-                         or meta.get("og:article:published_time")
-                         or meta.get("publishedTime")
-                         or meta.get("date")
+            # Some Firecrawl responses return list-valued meta (multiple og: tags
+            # in the same page), so normalise to a single string.
+            def _first_str(v):
+                if isinstance(v, (list, tuple)):
+                    v = next((x for x in v if x), "")
+                return str(v) if v else ""
+            published = (_first_str(meta.get("article:published_time"))
+                         or _first_str(meta.get("og:article:published_time"))
+                         or _first_str(meta.get("publishedTime"))
+                         or _first_str(meta.get("date"))
                          or "")
             if not published:
                 # Heuristic: scan the first 2 KB of the body for a date pattern
