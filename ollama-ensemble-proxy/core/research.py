@@ -299,24 +299,32 @@ class WebResearcher:
         try:
             async with httpx.AsyncClient(timeout=20) as client:
                 resp = await client.get(url, params=params)
-                if resp.status_code == 200:
+                if resp.status_code != 200:
+                    return []
+                # Defensive: a non-JSON response (eg. SearxNG behind login,
+                # or wrong port serving a different app) would raise here.
+                try:
                     data = resp.json()
-                    for res in data.get("results", [])[:self.config.web_per_query_results]:
-                        title = res.get("title", "")
-                        snippet = res.get("content", "")
-                        if tags and not self._filter_by_tags(f"{title} {snippet}", tags):
-                            continue
-                        links.append({"title": title, "url": res.get("url"), "snippet": snippet, "engine": "searxng"})
+                except Exception:
+                    return []
+                for res in data.get("results", [])[:self.config.web_per_query_results]:
+                    title = res.get("title", "")
+                    snippet = res.get("content", "")
+                    if tags and not self._filter_by_tags(f"{title} {snippet}", tags):
+                        continue
+                    links.append({"title": title, "url": res.get("url"), "snippet": snippet, "engine": "searxng"})
         except Exception as e:
             log.warning("SearxNG API error", extra={"error": str(e)})
         return links
 
     async def _search_wikipedia(self, query: str, tags: list[str] = None) -> list[dict[str, str]]:
         api_url = "https://fr.wikipedia.org/w/api.php"
-        params = {"action": "query", "list": "search", "srsearch": query, "format": "json", "srlimit": 5}
+        params = {"action": "query", "list": "search", "srsearch": query, "format": "json", "srlimit": 10}
+        # Wikimedia requires a descriptive User-Agent since 2025-Q3, otherwise 403.
+        headers = {"User-Agent": "AIDocGen/1.0 (https://electrosens.fr; noreply@office.electrosens.fr)"}
         links = []
         try:
-            async with httpx.AsyncClient(timeout=10) as client:
+            async with httpx.AsyncClient(timeout=10, headers=headers) as client:
                 resp = await client.get(api_url, params=params)
                 if resp.status_code == 200:
                     data = resp.json()
@@ -345,9 +353,10 @@ class WebResearcher:
         tbs = None
         if rd > 0:
             tbs = "qdr:y" if rd > 90 else "qdr:m" if rd > 7 else "qdr:w"
+        # Firecrawl /search caps at 50 per query on most plans
         payload: dict[str, Any] = {
             "query": query,
-            "limit": min(20, self.config.web_per_query_results),
+            "limit": min(50, max(20, self.config.web_per_query_results)),
             "lang": "fr",
         }
         if tbs:
@@ -392,7 +401,8 @@ class WebResearcher:
         payload: dict[str, Any] = {
             "api_key": self.config.tavily_api_key,
             "query": query,
-            "max_results": min(20, self.config.web_per_query_results),
+            # Tavily caps at 20 advanced results
+            "max_results": min(20, max(10, self.config.web_per_query_results)),
             "search_depth": "advanced",
             "include_answer": False,
             "include_raw_content": False,
@@ -608,8 +618,8 @@ class WebResearcher:
                 self._search_arxiv(query, tags),
                 self._search_pubmed(query, tags),
             ]
-            # Domain-discovery on every 3rd query (cheap)
-            if self.config.firecrawl_api_key and idx % 3 == 1:
+            # Domain-discovery on every query (Firecrawl /map → broaden coverage)
+            if self.config.firecrawl_api_key:
                 search_tasks.append(self._search_firecrawl_discover(query, tags))
 
             engine_results = await asyncio.gather(*search_tasks, return_exceptions=True)
