@@ -108,7 +108,12 @@ class Writer:
                 for v in obj: walk(v, parent_title=parent_title)
         walk(data); return normalized
 
-    def generate_sub_questions_from_outline(self, outline: list[dict[str, Any]], main_question: str, tags: list[str] = None, max_questions: int = 35) -> list[dict[str, str]]:
+    def generate_sub_questions_from_outline(self, outline: list[dict[str, Any]], main_question: str, tags: list[str] = None, max_questions: int | None = None) -> list[dict[str, str]]:
+        # Pull the cap from config so it's tunable per-run (UI / env).
+        # 0 means "no cap" → use one query per (chapter, sub_section) pair.
+        if max_questions is None:
+            cfg_cap = getattr(self.config, "web_max_sub_questions", 0) or 0
+            max_questions = cfg_cap if cfg_cap > 0 else 10**6
         """Generate search sub-questions from the outline sections."""
         sub_questions = []
         sq_id = 1
@@ -362,10 +367,16 @@ class Writer:
                 try:
                     partial = json.loads(partial_path.read_text(encoding="utf-8"))
                     existing = partial.get("sections", [])
+                    # If the cache already has all sections, return as-is.
+                    if existing and len(existing) >= len(tasks):
+                        log.info("RESUME: all sections present, skipping writer",
+                                 extra={"count": len(existing)})
+                        return {"sections": existing}
                     if existing and len(existing) < len(tasks):
                         sections_content = existing
                         start_idx = len(existing)
-                        log.info("RESUME: Found / existing sections, continuing from section", extra={"start_idx": start_idx})
+                        log.info("RESUME: continuing from section",
+                                 extra={"start_idx": start_idx, "total": len(tasks)})
                 except Exception:
                     pass
 
@@ -511,7 +522,9 @@ class Writer:
         """
         api_key = os.getenv("IMAGE_GEN_API_KEY", "").strip()
         if not api_key:
-            raise RuntimeError("IMAGE_GEN_API_KEY missing — cannot generate AI illustration")
+            log.warning("IMAGE_GEN_API_KEY missing — skipping AI illustration "
+                        "(section will have no image)")
+            return None
         provider = os.getenv("IMAGE_GEN_PROVIDER", "replicate").lower()
         images_dir = run_dir / "ai_images"
         images_dir.mkdir(exist_ok=True)
@@ -622,7 +635,15 @@ class Writer:
                     f"Style: clean, professional, schematic, neutral background, "
                     f"no text overlay. Photographic or vector flat illustration."
                 )
-                local = await self._generate_ai_image(prompt, run_dir, ai_idx)
+                try:
+                    local = await self._generate_ai_image(prompt, run_dir, ai_idx)
+                except Exception as e:
+                    # Image generation must NEVER kill the pipeline. We've
+                    # already produced hours of valuable text content; an
+                    # illustration glitch is cosmetic. Log and continue.
+                    log.warning("AI image generation failed; section gets no image",
+                                extra={"error": str(e), "section": s_title[:80]})
+                    local = None
                 if local:
                     rel = Path(local).relative_to(run_dir)
                     picked = {"url": str(rel), "alt": s_title}
