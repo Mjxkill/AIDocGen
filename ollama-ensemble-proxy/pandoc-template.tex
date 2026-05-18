@@ -224,6 +224,15 @@ $endif$
 \usepackage{float}
 \usepackage{caption}
 \captionsetup[figure]{font=small,skip=4pt}
+%% Cap any \includegraphics without explicit size to page dimensions
+%% (keeps small images at native size; shrinks oversize ones to fit)
+\makeatletter
+\def\maxwidth#1{\ifdim\Gin@nat@width>#1\relax #1\else\Gin@nat@width\fi}
+\def\maxheight#1{\ifdim\Gin@nat@height>#1\relax #1\else\Gin@nat@height\fi}
+\makeatother
+%% keepaspectratio par défaut sur tous les \includegraphics
+%% (pandoc 3.x n'ajoute plus keepaspectratio automatiquement quand width et height sont donnés)
+\setkeys{Gin}{keepaspectratio,width=\maxwidth{\textwidth},height=\maxheight{0.55\textheight}}
 
 %% ── Math ──
 \usepackage{amsmath}

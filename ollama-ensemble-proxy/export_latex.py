@@ -5,6 +5,7 @@ Reads sections.json to build a clean Markdown with proper heading hierarchy,
 generates a BibTeX bibliography from corpus sources,
 then delegates all Markdown->LaTeX conversion to Pandoc.
 """
+import hashlib
 import json
 import re
 import subprocess
@@ -75,6 +76,188 @@ def _render_mermaid_blocks(markdown_text: str, out_dir: Path) -> str:
             return f"\n\n```\n{mmd_code}\n```\n\n"
 
     return pattern.sub(replace, markdown_text)
+
+
+_IMG_MD_RE = re.compile(r'!\[([^\]]*)\]\((https?://[^\s)]+)\)')
+
+# Match: ![alt](path){...?}   optionally followed by an italic caption block
+_IMG_BLOCK_RE = re.compile(
+    r'!\[([^\]]*)\]\(([^)\s]+)\)(?:\{[^}]*\})?'  # image markdown
+    r'(?:[ \t]*\n+[ \t]*\*[^*\n][^*]*\*[ \t]*)?',  # optional italic caption block right after
+)
+
+
+def _dedupe_section_images(md: str) -> str:
+    """Supprime les images dupliquées (même path) au sein d'une même section H2.
+
+    Le writer peut injecter la même image deux fois dans une section
+    (fallbacks multiples convergent vers la même source). On ne garde
+    que la première occurrence par path dans chaque section ``## ...``.
+    """
+    parts = re.split(r'(?m)^(## .*)$', md)
+    # parts = [preamble, heading, content, heading, content, ...]
+    out = [parts[0]]
+    removed = 0
+    for i in range(1, len(parts), 2):
+        heading = parts[i]
+        content = parts[i + 1] if i + 1 < len(parts) else ""
+        seen: set[str] = set()
+
+        def repl(m: re.Match) -> str:
+            nonlocal removed
+            path = m.group(2)
+            if path in seen:
+                removed += 1
+                return ""
+            seen.add(path)
+            return m.group(0)
+
+        new_content = _IMG_BLOCK_RE.sub(repl, content)
+        out.append(heading)
+        out.append(new_content)
+    if removed:
+        print(f"Dedupe: {removed} doublons d'image supprimés (section-level)")
+    return "".join(out)
+
+
+def _download_remote_images(markdown_text: str, out_dir: Path) -> str:
+    """Download ![alt](http(s)://...) image URLs to local files and rewrite refs.
+
+    pandoc + pdflatex cannot fetch remote images. Without a local copy the URL
+    leaks into the PDF as plain text. We cache by URL hash so re-runs are cheap.
+    On any download/HTTP error we drop the image entirely (keeping nothing) so
+    the PDF doesn't show a stray URL.
+    """
+    try:
+        import requests
+    except Exception:
+        return markdown_text
+
+    images_dir = out_dir / "images_dl"
+    images_dir.mkdir(exist_ok=True)
+    headers = {
+        "User-Agent": "AIDocGen/1.0 (+https://electrosens.fr)",
+        "Accept": "image/*,*/*;q=0.8",
+    }
+    cache: dict[str, str | None] = {}
+
+    def _ext_from(url: str, content_type: str) -> str:
+        ct = (content_type or "").lower().split(";")[0].strip()
+        mapping = {
+            "image/jpeg": ".jpg", "image/jpg": ".jpg",
+            "image/png": ".png", "image/gif": ".gif",
+            "image/webp": ".webp", "image/svg+xml": ".svg",
+            "image/bmp": ".bmp", "image/tiff": ".tiff",
+        }
+        if ct in mapping:
+            return mapping[ct]
+        # fallback: try extension from URL path
+        m = re.search(r'\.(jpe?g|png|gif|webp|svg|bmp|tiff)(?:\?|$)', url, re.IGNORECASE)
+        if m:
+            ext = m.group(1).lower()
+            return ".jpg" if ext == "jpeg" else f".{ext}"
+        return ".img"
+
+    def _convert_webp_to_png(webp_path: Path) -> Path | None:
+        """pdflatex ne supporte pas .webp; on convertit en PNG via dwebp."""
+        png_path = webp_path.with_suffix(".png")
+        if png_path.exists() and png_path.stat().st_size > 256:
+            try:
+                webp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            return png_path
+        try:
+            r = subprocess.run(
+                ["dwebp", str(webp_path), "-o", str(png_path)],
+                capture_output=True, timeout=30,
+            )
+            if r.returncode == 0 and png_path.exists() and png_path.stat().st_size > 256:
+                try:
+                    webp_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                return png_path
+        except Exception:
+            pass
+        return None
+
+    def fetch(url: str) -> str | None:
+        if url in cache:
+            return cache[url]
+        h = hashlib.sha1(url.encode("utf-8")).hexdigest()[:20]
+        # check if already cached on disk
+        for existing in images_dir.glob(f"{h}.*"):
+            cache[url] = f"images_dl/{existing.name}"
+            return cache[url]
+        try:
+            r = requests.get(url, headers=headers, timeout=20, stream=True)
+            if r.status_code != 200:
+                cache[url] = None
+                return None
+            ct = r.headers.get("Content-Type", "")
+            if "image" not in ct.lower():
+                # not an image (e.g. HTML error page) — drop
+                cache[url] = None
+                return None
+            ext = _ext_from(url, ct)
+            # skip SVG (pdflatex doesn't render it without extra tooling)
+            if ext == ".svg":
+                cache[url] = None
+                return None
+            fname = f"{h}{ext}"
+            fpath = images_dir / fname
+            with open(fpath, "wb") as f:
+                for chunk in r.iter_content(chunk_size=65536):
+                    if chunk:
+                        f.write(chunk)
+            if fpath.stat().st_size < 256:
+                # too small / probably broken
+                try:
+                    fpath.unlink()
+                except Exception:
+                    pass
+                cache[url] = None
+                return None
+            # pdflatex ne supporte pas .webp -> on convertit en PNG
+            if ext == ".webp":
+                png = _convert_webp_to_png(fpath)
+                if png is not None:
+                    cache[url] = f"images_dl/{png.name}"
+                    return cache[url]
+                cache[url] = None
+                return None
+            cache[url] = f"images_dl/{fname}"
+            return cache[url]
+        except Exception:
+            cache[url] = None
+            return None
+
+    def repl(m: re.Match) -> str:
+        alt = m.group(1)
+        url = m.group(2)
+        local = fetch(url)
+        if local:
+            # Raw LaTeX bloc figure[H] : place forcée, pas de flottement.
+            # (pandoc par défaut omet [H] et la figure dérive loin de son ancre.)
+            # Le caption italique du writer reste en paragraphe en-dessous.
+            return (
+                "\n\n```{=latex}\n"
+                "\\begin{figure}[H]\n"
+                "\\centering\n"
+                "\\includegraphics[width=0.85\\textwidth,height=0.55\\textheight,keepaspectratio]"
+                f"{{{local}}}\n"
+                "\\end{figure}\n"
+                "```\n\n"
+            )
+        # drop image entirely — keep alt text as plain italic for context
+        return f"*{alt}*" if alt.strip() else ""
+
+    new_md = _IMG_MD_RE.sub(repl, markdown_text)
+    ok = sum(1 for v in cache.values() if v)
+    fail = sum(1 for v in cache.values() if not v)
+    print(f"Remote images: {ok} downloaded, {fail} dropped (total {len(cache)})")
+    return new_md
 
 
 def _clean_heading_text(text: str) -> str:
@@ -357,6 +540,13 @@ def generate_latex(run_id: str, data_dir: str = "data/dossiers") -> None:
         pandoc_md = detect_and_convert_register_tables(pandoc_md)
     except Exception as e:
         print(f"TikZ injection failed: {e}")
+
+    # ── DEDUP images dupliquées dans une même section H2 ──
+    # (fait avant le download pour matcher la forme ![alt](url))
+    pandoc_md = _dedupe_section_images(pandoc_md)
+
+    # ── DOWNLOAD REMOTE IMAGES so pandoc/pdflatex can embed them ──
+    pandoc_md = _download_remote_images(pandoc_md, base_path)
 
     # Write the clean markdown
     pandoc_input = base_path / "report_pandoc.md"

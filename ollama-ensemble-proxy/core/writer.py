@@ -630,8 +630,20 @@ class Writer:
                                 extra={"error": str(e)})
 
         used_urls: set[str] = set()
+        # If we resume after a crash, some sections already contain an image.
+        # Seed used_urls with them AND skip those sections so we don't inject
+        # a second illustration on top of the existing one.
+        already_illustrated: set[int] = set()
+        for idx, sec in enumerate(sections_data.get("sections", []) or []):
+            existing_urls = re.findall(r'!\[[^\]]*\]\(([^)]+)\)', sec.get("content") or "")
+            if existing_urls:
+                used_urls.update(existing_urls)
+                already_illustrated.add(idx)
+
         ai_idx = 0
-        for sec in sections_data.get("sections", []):
+        for idx, sec in enumerate(sections_data.get("sections", [])):
+            if idx in already_illustrated:
+                continue
             content = sec.get("content") or ""
             if not content:
                 continue
