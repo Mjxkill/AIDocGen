@@ -606,11 +606,24 @@ class Writer:
                 continue
             s_title = sec.get("title", "")
             c_title = sec.get("chapter_title", "")
-            # Citations like [CLM-xxx] in the content
-            cited_ids = list(dict.fromkeys(re.findall(r'\[CLM-([A-Za-z0-9_\-]+)\]', content)))
+            # The writer cites with [CLM-xxx] where xxx may be:
+            #   - a real claim_id (claim_007, …)         → lookup claim_to_src
+            #   - a source_id (SRC-abc123…)              → use directly
+            #   - the source_id stripped of its prefix   → re-prefix and try
+            # Also accept bare [SRC-xxx] citations.
+            cited_tokens = list(dict.fromkeys(
+                re.findall(r'\[(?:CLM|SRC)-([A-Za-z0-9_\-]+)\]', content)
+            ))
             candidate_images: list[tuple[float, dict, str]] = []
-            for cid in cited_ids[:8]:
-                src_id = claim_to_src.get(f"CLM-{cid}") or claim_to_src.get(cid)
+            for cid in cited_tokens[:12]:
+                src_id = (
+                    claim_to_src.get(f"CLM-{cid}")
+                    or claim_to_src.get(cid)
+                    # Writer sometimes embeds the source_id (with or without
+                    # SRC- prefix) inside the CLM-… brackets.
+                    or (cid if cid in src_by_id else None)
+                    or (f"SRC-{cid}" if f"SRC-{cid}" in src_by_id else None)
+                )
                 src = src_by_id.get(src_id) if src_id else None
                 if not src:
                     continue
@@ -626,6 +639,33 @@ class Writer:
                 candidate_images.sort(key=lambda x: x[0], reverse=True)
                 _, picked, picked_source = candidate_images[0]
                 used_urls.add(picked["url"])
+
+            # Fallback: when no cited source brought a usable image,
+            # search ALL corpus sources whose title/url loosely matches the
+            # section / chapter title. Lets section pages get an image even
+            # when the writer cited the wrong [CLM-…] ids.
+            if not picked:
+                section_keys = self._extract_keywords(f"{s_title} {c_title}")
+                if section_keys:
+                    key_set = set(k.lower() for k in section_keys if len(k) > 3)
+                    fallback_candidates: list[tuple[float, dict, str]] = []
+                    for src in src_by_id.values():
+                        imgs = src.get("images") or []
+                        if not imgs:
+                            continue
+                        haystack = (src.get("title", "") + " " + src.get("url", "")).lower()
+                        overlap = sum(1 for k in key_set if k in haystack)
+                        if overlap < 1:
+                            continue
+                        for img in imgs[:3]:
+                            if img.get("url") in used_urls:
+                                continue
+                            score = float(overlap) + self._score_image(img, s_title, c_title)
+                            fallback_candidates.append((score, img, src.get("url", "")))
+                    if fallback_candidates:
+                        fallback_candidates.sort(key=lambda x: x[0], reverse=True)
+                        _, picked, picked_source = fallback_candidates[0]
+                        used_urls.add(picked["url"])
 
             if not picked and generate_ai and run_dir is not None:
                 ai_idx += 1
