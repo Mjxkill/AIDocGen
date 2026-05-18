@@ -165,6 +165,22 @@ class Writer:
         words = re.findall(r'\b[a-zA-Z\u00c0-\u00ff]{3,}\b', text.lower())
         return [w for w in words if w not in stop_words][:6]
 
+    def _section_match_tokens(self, text: str) -> set[str]:
+        """Tokenize for image-matching: includes acronyms (DSP, FFT, IIR\u2026)
+        which are common in technical section titles and would otherwise
+        be stripped by the 3+ char filter or hidden by .lower()."""
+        tokens: set[str] = set()
+        # Long words, case-insensitive (>= 4 chars)
+        for w in re.findall(r"[A-Za-z\u00c0-\u00ff]{4,}", text):
+            tokens.add(w.lower())
+        # Acronyms: 2-6 char ALL-CAPS sequences (DSP, FFT, LUFS, EBU, DAW\u2026)
+        for w in re.findall(r"\b[A-Z]{2,6}\b", text):
+            tokens.add(w.lower())
+        # Stop words (long enough to slip past first pass)
+        tokens -= {"avec", "dans", "pour", "with", "from", "this", "that",
+                   "their", "your", "our"}
+        return tokens
+
     def _build_search_query(self, section_title: str, context_keywords: list[str], main_topic: str, tags: list[str] = None) -> str:
         section_keywords = self._extract_keywords(section_title)
         query_parts = section_keywords[:4]
@@ -598,6 +614,21 @@ class Writer:
         # source_id -> source dict
         src_by_id = {s.get("source_id"): s for s in (corpus or {}).get("sources", [])}
 
+        # Top-ranked sources from the shortlist, used as last-resort image
+        # pool when neither citations nor title-matching yield an image.
+        shortlist_top: list[tuple[str, float]] = []
+        if run_dir is not None:
+            sl_path = run_dir / "shortlist.json"
+            if sl_path.exists():
+                try:
+                    sl = json.loads(sl_path.read_text(encoding="utf-8"))
+                    items = sl.get("shortlist", []) if isinstance(sl, dict) else []
+                    shortlist_top = [(it.get("source_id", ""), it.get("score", 0.0))
+                                     for it in items[:150] if it.get("source_id")]
+                except Exception as e:
+                    log.warning("could not load shortlist for image fallback",
+                                extra={"error": str(e)})
+
         used_urls: set[str] = set()
         ai_idx = 0
         for sec in sections_data.get("sections", []):
@@ -640,14 +671,12 @@ class Writer:
                 _, picked, picked_source = candidate_images[0]
                 used_urls.add(picked["url"])
 
-            # Fallback: when no cited source brought a usable image,
-            # search ALL corpus sources whose title/url loosely matches the
-            # section / chapter title. Lets section pages get an image even
-            # when the writer cited the wrong [CLM-…] ids.
+            # Fallback A: scan ALL corpus sources whose title/url loosely
+            # matches the section/chapter title (handles writer citing
+            # the wrong CLM- ids OR not citing at all).
             if not picked:
-                section_keys = self._extract_keywords(f"{s_title} {c_title}")
-                if section_keys:
-                    key_set = set(k.lower() for k in section_keys if len(k) > 3)
+                key_set = self._section_match_tokens(f"{s_title} {c_title}")
+                if key_set:
                     fallback_candidates: list[tuple[float, dict, str]] = []
                     for src in src_by_id.values():
                         imgs = src.get("images") or []
@@ -666,6 +695,24 @@ class Writer:
                         fallback_candidates.sort(key=lambda x: x[0], reverse=True)
                         _, picked, picked_source = fallback_candidates[0]
                         used_urls.add(picked["url"])
+
+            # Fallback B: any high-ranked source from the shortlist that
+            # has an image. Guarantees broad coverage even on sections
+            # whose title shares no token with any source.
+            if not picked and shortlist_top:
+                for sid, _rank in shortlist_top:
+                    src = src_by_id.get(sid)
+                    if not src:
+                        continue
+                    for img in (src.get("images") or [])[:3]:
+                        if img.get("url") in used_urls:
+                            continue
+                        picked = img
+                        picked_source = src.get("url", "")
+                        used_urls.add(picked["url"])
+                        break
+                    if picked:
+                        break
 
             if not picked and generate_ai and run_dir is not None:
                 ai_idx += 1
