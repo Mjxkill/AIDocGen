@@ -688,6 +688,21 @@ class WebResearcher:
         if self.config.firecrawl_api_key and self.config.firecrawl_extract_enabled:
             await self._extract_structured_data(fetched_sources, run_dir, progress_cb)
 
+        # ── Phase 4: Vision-LLM captions on candidate images ──
+        # Caches caption in each img dict so the writer's _score_image
+        # can match against actual image content, not just alt-text.
+        if self.config.vision_enabled and self.config.vision_model:
+            if run_dir:
+                await emit_progress(progress_cb, run_dir, "corpus",
+                    "Analyse vision des images du corpus...")
+            try:
+                from .vision import caption_corpus_images
+                stats = await caption_corpus_images(fetched_sources, self.config)
+                log.info("vision phase done", extra=stats)
+            except Exception as e:
+                log.warning("vision phase failed (continuing without captions)",
+                            extra={"error": str(e)})
+
         return {
             "sources": fetched_sources,
             "count": len(fetched_sources),

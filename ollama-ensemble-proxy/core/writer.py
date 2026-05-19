@@ -519,16 +519,30 @@ class Writer:
 
     @staticmethod
     def _score_image(image: dict, section_title: str, chapter_title: str) -> float:
-        """Crude relevance score: keyword overlap between alt text and section/chapter."""
-        alt = (image.get("alt") or "").lower()
-        if not alt:
-            return 0.1  # at least keep it as fallback
-        title_words = set(re.findall(r'\b[a-zà-ÿ]{4,}\b', f"{section_title} {chapter_title}".lower()))
-        alt_words = set(re.findall(r'\b[a-zà-ÿ]{4,}\b', alt))
-        if not title_words:
-            return 0.5
-        overlap = len(title_words & alt_words)
-        return 0.5 + 0.5 * (overlap / max(1, len(title_words)))
+        """Relevance score on [0..1] : combines vision caption (priorité) and alt text.
+
+        Returns 0 if the image was tagged DECORATIVE by vision, or has no usable text.
+        Higher score = more relevant to the section title / chapter title.
+        """
+        # vision_caption=="" => DECORATIVE -> never use
+        vc = image.get("vision_caption")
+        if vc == "":
+            return 0.0
+        text = (vc or "") + " " + (image.get("alt") or "")
+        text = text.lower().strip()
+        if not text:
+            return 0.0
+        title_words = set(re.findall(r'\b[a-zà-ÿ]{4,}\b',
+                                     f"{section_title} {chapter_title}".lower()))
+        text_words = set(re.findall(r'\b[a-zà-ÿ]{4,}\b', text))
+        if not title_words or not text_words:
+            return 0.0
+        overlap = len(title_words & text_words)
+        # 0..1 score: fraction of section keywords covered by the caption
+        coverage = overlap / max(1, len(title_words))
+        # vision captions deserve a small boost vs alt-only text
+        boost = 0.15 if vc else 0.0
+        return min(1.0, coverage + boost)
 
     async def _generate_ai_image(self, prompt: str, run_dir: Path, idx: int) -> str | None:
         """Generate one illustration via an external image API. Returns local path or None.
@@ -640,6 +654,8 @@ class Writer:
                 used_urls.update(existing_urls)
                 already_illustrated.add(idx)
 
+        threshold = float(getattr(self.config, "vision_score_threshold", 0.5))
+
         ai_idx = 0
         for idx, sec in enumerate(sections_data.get("sections", [])):
             if idx in already_illustrated:
@@ -657,74 +673,53 @@ class Writer:
             cited_tokens = list(dict.fromkeys(
                 re.findall(r'\[(?:CLM|SRC)-([A-Za-z0-9_\-]+)\]', content)
             ))
-            candidate_images: list[tuple[float, dict, str]] = []
-            for cid in cited_tokens[:12]:
-                src_id = (
-                    claim_to_src.get(f"CLM-{cid}")
-                    or claim_to_src.get(cid)
-                    # Writer sometimes embeds the source_id (with or without
-                    # SRC- prefix) inside the CLM-… brackets.
-                    or (cid if cid in src_by_id else None)
-                    or (f"SRC-{cid}" if f"SRC-{cid}" in src_by_id else None)
-                )
-                src = src_by_id.get(src_id) if src_id else None
+
+            # Collect ALL candidates from cited sources + shortlist top-150,
+            # score them all via _score_image (uses vision_caption when
+            # available), then keep the best one — IF it clears the
+            # relevance threshold. No image is better than a hors-sujet one.
+            candidates: list[tuple[float, dict, str]] = []
+
+            def _add_candidates(src: dict | None):
                 if not src:
-                    continue
+                    return
                 for img in (src.get("images") or [])[:5]:
                     if img.get("url") in used_urls:
                         continue
                     score = self._score_image(img, s_title, c_title)
-                    candidate_images.append((score, img, src.get("url", "")))
+                    if score > 0:
+                        candidates.append((score, img, src.get("url", "")))
+
+            for cid in cited_tokens[:12]:
+                src_id = (
+                    claim_to_src.get(f"CLM-{cid}")
+                    or claim_to_src.get(cid)
+                    or (cid if cid in src_by_id else None)
+                    or (f"SRC-{cid}" if f"SRC-{cid}" in src_by_id else None)
+                )
+                _add_candidates(src_by_id.get(src_id) if src_id else None)
+
+            # Title-keyword sources (fallback A folded into the candidate pool)
+            key_set = self._section_match_tokens(f"{s_title} {c_title}")
+            if key_set:
+                for src in src_by_id.values():
+                    haystack = (src.get("title", "") + " " + src.get("url", "")).lower()
+                    if not any(k in haystack for k in key_set):
+                        continue
+                    _add_candidates(src)
+
+            # Shortlist top sources (fallback B folded in)
+            for sid, _rank in shortlist_top:
+                _add_candidates(src_by_id.get(sid))
 
             picked: dict | None = None
             picked_source: str | None = None
-            if candidate_images:
-                candidate_images.sort(key=lambda x: x[0], reverse=True)
-                _, picked, picked_source = candidate_images[0]
-                used_urls.add(picked["url"])
-
-            # Fallback A: scan ALL corpus sources whose title/url loosely
-            # matches the section/chapter title (handles writer citing
-            # the wrong CLM- ids OR not citing at all).
-            if not picked:
-                key_set = self._section_match_tokens(f"{s_title} {c_title}")
-                if key_set:
-                    fallback_candidates: list[tuple[float, dict, str]] = []
-                    for src in src_by_id.values():
-                        imgs = src.get("images") or []
-                        if not imgs:
-                            continue
-                        haystack = (src.get("title", "") + " " + src.get("url", "")).lower()
-                        overlap = sum(1 for k in key_set if k in haystack)
-                        if overlap < 1:
-                            continue
-                        for img in imgs[:3]:
-                            if img.get("url") in used_urls:
-                                continue
-                            score = float(overlap) + self._score_image(img, s_title, c_title)
-                            fallback_candidates.append((score, img, src.get("url", "")))
-                    if fallback_candidates:
-                        fallback_candidates.sort(key=lambda x: x[0], reverse=True)
-                        _, picked, picked_source = fallback_candidates[0]
-                        used_urls.add(picked["url"])
-
-            # Fallback B: any high-ranked source from the shortlist that
-            # has an image. Guarantees broad coverage even on sections
-            # whose title shares no token with any source.
-            if not picked and shortlist_top:
-                for sid, _rank in shortlist_top:
-                    src = src_by_id.get(sid)
-                    if not src:
-                        continue
-                    for img in (src.get("images") or [])[:3]:
-                        if img.get("url") in used_urls:
-                            continue
-                        picked = img
-                        picked_source = src.get("url", "")
-                        used_urls.add(picked["url"])
-                        break
-                    if picked:
-                        break
+            if candidates:
+                candidates.sort(key=lambda x: x[0], reverse=True)
+                best_score, best_img, best_src = candidates[0]
+                if best_score >= threshold:
+                    picked, picked_source = best_img, best_src
+                    used_urls.add(picked["url"])
 
             if not picked and generate_ai and run_dir is not None:
                 ai_idx += 1

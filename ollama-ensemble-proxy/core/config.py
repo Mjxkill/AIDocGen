@@ -71,6 +71,12 @@ class DossierConfig:
     recency_boost: float  # how much to boost recent sources in shortlist (0.0-1.0)
     writer_enable_critique: bool
     coherence_embed_model: str
+    # Vision-LLM caption of corpus images (improves image-section pertinence)
+    vision_enabled: bool
+    vision_model: str
+    vision_max_per_source: int
+    vision_max_parallel: int
+    vision_score_threshold: float
 
     @classmethod
     def from_env(cls) -> "DossierConfig":
@@ -142,4 +148,9 @@ class DossierConfig:
             recency_boost=float(os.getenv("ENSEMBLE_DOSSIER_RECENCY_BOOST", "0.5")),
             writer_enable_critique=env_bool("ENSEMBLE_DOSSIER_WRITER_CRITIQUE", True),
             coherence_embed_model=os.getenv("ENSEMBLE_DOSSIER_COHERENCE_EMBED_MODEL", "mxbai-embed-large"),
+            vision_enabled=env_bool("ENSEMBLE_VISION_ENABLED", True),
+            vision_model=os.getenv("ENSEMBLE_VISION_MODEL", "qwen3-vl:235b"),
+            vision_max_per_source=max(1, int(os.getenv("ENSEMBLE_VISION_MAX_PER_SOURCE", "3"))),
+            vision_max_parallel=max(1, int(os.getenv("ENSEMBLE_VISION_MAX_PARALLEL", "6"))),
+            vision_score_threshold=float(os.getenv("ENSEMBLE_VISION_SCORE_THRESHOLD", "0.5")),
         )
