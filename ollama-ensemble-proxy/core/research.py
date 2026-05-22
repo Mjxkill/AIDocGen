@@ -254,43 +254,57 @@ class WebResearcher:
         if tags:
             queries.append(self._add_year_to_query(self._enhance_query_with_tags(question, tags)))
 
-        results = []
-        try:
-            with DDGS() as ddgs:
-                for q in queries[:2]:
-                    for res in ddgs.text(q, max_results=5):
-                        title = res.get("title", "")
-                        snippet = res.get("body", "")
-                        if tags and not self._filter_by_tags(f"{title} {snippet}", tags):
-                            continue
-                        results.append({
-                            "title": title,
-                            "url": res.get("href", ""),
-                            "snippet": snippet,
-                        })
-        except Exception:
-            pass
-        return results
+        def _blocking_presearch() -> list[dict[str, str]]:
+            out: list[dict[str, str]] = []
+            try:
+                with DDGS() as ddgs:
+                    for q in queries[:2]:
+                        for res in ddgs.text(q, max_results=5):
+                            title = res.get("title", "")
+                            snippet = res.get("body", "")
+                            if tags and not self._filter_by_tags(f"{title} {snippet}", tags):
+                                continue
+                            out.append({
+                                "title": title,
+                                "url": res.get("href", ""),
+                                "snippet": snippet,
+                            })
+            except Exception:
+                pass
+            return out
+
+        return await asyncio.to_thread(_blocking_presearch)
 
     # ─────────────────────────────────────────────
     # PARALLEL MULTI-ENGINE SEARCH
     # ─────────────────────────────────────────────
 
     async def _search_ddg(self, query: str, tags: list[str] = None) -> list[dict[str, str]]:
-        """DuckDuckGo search."""
-        links = []
-        try:
-            await asyncio.sleep(self.config.web_request_delay)
-            with DDGS() as ddgs:
-                for res in ddgs.text(query, max_results=self.config.web_per_query_results):
-                    title = res.get("title", "")
-                    snippet = res.get("body", "")
-                    if tags and not self._filter_by_tags(f"{title} {snippet}", tags):
-                        continue
-                    links.append({"title": title, "url": res.get("href", ""), "snippet": snippet, "engine": "ddg"})
-        except Exception as e:
-            log.warning("DDG Search error", extra={"error": str(e)})
-        return links
+        """DuckDuckGo search.
+
+        DDGS est synchrone (requests). Sans isolation thread, un timeout DDG
+        (~11s) bloque l'event loop FastAPI -> tout le service devient muet.
+        On déporte donc l'appel dans un thread.
+        """
+        await asyncio.sleep(self.config.web_request_delay)
+        max_results = self.config.web_per_query_results
+
+        def _blocking_ddg() -> list[dict[str, str]]:
+            out: list[dict[str, str]] = []
+            try:
+                with DDGS() as ddgs:
+                    for res in ddgs.text(query, max_results=max_results):
+                        title = res.get("title", "")
+                        snippet = res.get("body", "")
+                        if tags and not self._filter_by_tags(f"{title} {snippet}", tags):
+                            continue
+                        out.append({"title": title, "url": res.get("href", ""),
+                                    "snippet": snippet, "engine": "ddg"})
+            except Exception as e:
+                log.warning("DDG Search error", extra={"error": str(e)})
+            return out
+
+        return await asyncio.to_thread(_blocking_ddg)
 
     async def _search_searxng(self, query: str, tags: list[str] = None) -> list[dict[str, str]]:
         url = f"{self.config.searxng_base_url.rstrip('/')}/search"
@@ -551,11 +565,17 @@ class WebResearcher:
         if not self.config.firecrawl_api_key:
             return []
         # First get a few DDG results to find relevant domains
+        # DDGS est synchrone — on isole dans un thread pour ne pas bloquer
+        # l'event loop pendant les ~11s de timeout de DDG.
         links = []
-        try:
-            with DDGS() as ddgs:
-                top_results = list(ddgs.text(query, max_results=3))
-        except Exception:
+        def _ddg_top():
+            try:
+                with DDGS() as ddgs:
+                    return list(ddgs.text(query, max_results=3))
+            except Exception:
+                return []
+        top_results = await asyncio.to_thread(_ddg_top)
+        if not top_results:
             return []
 
         # Map each domain to discover related pages
