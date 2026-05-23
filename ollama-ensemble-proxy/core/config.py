@@ -152,5 +152,5 @@ class DossierConfig:
             vision_model=os.getenv("ENSEMBLE_VISION_MODEL", "qwen3-vl:235b"),
             vision_max_per_source=max(1, int(os.getenv("ENSEMBLE_VISION_MAX_PER_SOURCE", "3"))),
             vision_max_parallel=max(1, int(os.getenv("ENSEMBLE_VISION_MAX_PARALLEL", "6"))),
-            vision_score_threshold=float(os.getenv("ENSEMBLE_VISION_SCORE_THRESHOLD", "0.5")),
+            vision_score_threshold=float(os.getenv("ENSEMBLE_VISION_SCORE_THRESHOLD", "0.25")),
         )

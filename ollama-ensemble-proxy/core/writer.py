@@ -663,8 +663,10 @@ class Writer:
             content = sec.get("content") or ""
             if not content:
                 continue
-            s_title = sec.get("title", "")
-            c_title = sec.get("chapter_title", "")
+            # Sections in sections.json use s_title/c_title (with underscores).
+            # Keep title/chapter_title as fallbacks for any other call site.
+            s_title = sec.get("s_title") or sec.get("title") or ""
+            c_title = sec.get("c_title") or sec.get("chapter_title") or ""
             # The writer cites with [CLM-xxx] where xxx may be:
             #   - a real claim_id (claim_007, …)         → lookup claim_to_src
             #   - a source_id (SRC-abc123…)              → use directly
