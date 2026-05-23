@@ -78,11 +78,13 @@ def _render_mermaid_blocks(markdown_text: str, out_dir: Path) -> str:
     return pattern.sub(replace, markdown_text)
 
 
-_IMG_MD_RE = re.compile(r'!\[([^\]]*)\]\((https?://[^\s)]+)\)')
+# Lazy `(.*?)` + backtracking handles `]` inside the alt-text (eg "[News] ...").
+# `[^\]]*` would refuse the bracket and silently skip these images.
+_IMG_MD_RE = re.compile(r'!\[(.*?)\]\((https?://[^\s)]+)\)')
 
 # Match: ![alt](path){...?}   optionally followed by an italic caption block
 _IMG_BLOCK_RE = re.compile(
-    r'!\[([^\]]*)\]\(([^)\s]+)\)(?:\{[^}]*\})?'  # image markdown
+    r'!\[(.*?)\]\(([^)\s]+)\)(?:\{[^}]*\})?'  # image markdown
     r'(?:[ \t]*\n+[ \t]*\*[^*\n][^*]*\*[ \t]*)?',  # optional italic caption block right after
 )
 

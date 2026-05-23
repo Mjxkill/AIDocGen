@@ -649,7 +649,7 @@ class Writer:
         # a second illustration on top of the existing one.
         already_illustrated: set[int] = set()
         for idx, sec in enumerate(sections_data.get("sections", []) or []):
-            existing_urls = re.findall(r'!\[[^\]]*\]\(([^)]+)\)', sec.get("content") or "")
+            existing_urls = re.findall(r'!\[.*?\]\(([^)]+)\)', sec.get("content") or "")
             if existing_urls:
                 used_urls.update(existing_urls)
                 already_illustrated.add(idx)

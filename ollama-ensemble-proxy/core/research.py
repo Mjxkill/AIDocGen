@@ -890,7 +890,8 @@ class WebResearcher:
     @staticmethod
     def _images_from_markdown(md: str, base_url: str = "") -> list[dict[str, str]]:
         items = []
-        for m in re.finditer(r'!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)', md or ""):
+        # Lazy `(.*?)` + backtracking handles `]` inside alt-text (eg "[News] ...").
+        for m in re.finditer(r'!\[(.*?)\]\(([^)\s]+)(?:\s+"[^"]*")?\)', md or ""):
             items.append({"alt": m.group(1), "url": m.group(2)})
         return WebResearcher._filter_image_urls(items, base_url)
 
