@@ -279,7 +279,7 @@ input::placeholder { color: var(--text-muted); }
   border-radius: var(--radius);
   padding: 16px 20px;
   display: grid;
-  grid-template-columns: 1fr 160px 280px;
+  grid-template-columns: minmax(0, 1fr) 160px 280px;
   align-items: center;
   gap: 20px;
   cursor: pointer;
@@ -291,6 +291,10 @@ input::placeholder { color: var(--text-muted); }
   box-shadow: 0 0 0 1px var(--accent-glow);
 }
 
+/* min-width: 0 lets ellipsis kick in on long titles, otherwise the
+   intrinsic min-content of the h4 stretches the column and pushes
+   the action-bar past the page edge. */
+.run-info-cell { min-width: 0; }
 .run-info-cell h4 {
   margin: 0 0 4px;
   font-size: 14px;
