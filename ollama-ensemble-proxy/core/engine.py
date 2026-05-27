@@ -21,13 +21,24 @@ class DossierEngine:
         self.writer = Writer(config, self.llm)
 
     async def run(self, run_id: str, question: str, prompt_type: str = "generic", detail_level: str = "medium", resume: bool = False, language: str = "fr", coder_model: str | None = None, tags: list[str] = None, include_images: bool = True, generate_ai_images: bool = False) -> dict[str, Any]:
+        # Research-first pipeline: understand the subject, search the matter
+        # exhaustively, THEN build a plan grounded in what was actually found.
+        # Designed for niche topics where the classic plan-first pipeline
+        # produces hallucinations.
+        if prompt_type == "dossier_recherche":
+            return await self.run_research(
+                run_id, question, detail_level=detail_level, resume=resume,
+                language=language, coder_model=coder_model, tags=tags,
+                include_images=include_images, generate_ai_images=generate_ai_images,
+            )
+
         run_dir = Path(self.config.data_dir) / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
-        
+
         # Store tags for later use
         if tags is None:
             tags = []
-        
+
         # Update status to running
         s_path = run_dir / "status.json"
         data = load_json(s_path) or {}
@@ -46,7 +57,7 @@ class DossierEngine:
             "coder": coder_model or self.config.planner_book_model_4_json,
         }
         save_json(s_path, data)
-        
+
         llm_logs = []
         if resume:
             logs = load_json(run_dir / "llm_logs.json")
@@ -157,3 +168,215 @@ class DossierEngine:
         result = await func()
         save_json(path, result)
         return result
+
+    async def run_research(self,
+                           run_id: str,
+                           question: str,
+                           detail_level: str = "medium",
+                           resume: bool = False,
+                           language: str = "fr",
+                           coder_model: str | None = None,
+                           tags: list[str] = None,
+                           include_images: bool = True,
+                           generate_ai_images: bool = False) -> dict[str, Any]:
+        """Research-first pipeline.
+
+        A. understand the subject (LLM brief)
+        B-D. search briques / combos / friction / analogies (existing engine,
+             but seeded from the brief instead of an imagined outline)
+        E. corpus synthesis
+        F. plan derived from the synthesis
+        ... validation pause ...
+        G+. existing rank / claims / verify / write / illustrate / export
+        """
+        from .discovery import (
+            analyze_subject, brief_to_sub_questions,
+            synthesize_corpus, build_plan_from_corpus,
+            save_brief, save_synthesis,
+        )
+
+        run_dir = Path(self.config.data_dir) / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+        if tags is None:
+            tags = []
+
+        s_path = run_dir / "status.json"
+        data = load_json(s_path) or {}
+        data["state"] = "running"
+        data["error"] = None
+        data["updated_at"] = int(time.time())
+        data["language"] = language
+        data["tags"] = tags
+        data["prompt_type"] = "dossier_recherche"
+        if coder_model: data["coder_model"] = coder_model
+        data["models"] = {
+            "planner": self.config.planner_model,
+            "writer": self.config.writer_model,
+            "judge": self.config.judge_model,
+            "verify": self.config.verify_model,
+            "extract": self.config.extract_model,
+            "coder": coder_model or self.config.planner_book_model_4_json,
+        }
+        save_json(s_path, data)
+
+        llm_logs = []
+        if resume:
+            logs = load_json(run_dir / "llm_logs.json")
+            if logs: llm_logs = logs
+
+        try:
+            # ── A. UNDERSTAND THE SUBJECT (no web yet) ──
+            await emit_progress(None, run_dir, "discovery_brief",
+                                "Compréhension du sujet (analyse LLM)...")
+            brief_path = run_dir / "discovery_brief.json"
+            if resume and brief_path.exists():
+                brief = load_json(brief_path)
+            else:
+                brief = await analyze_subject(
+                    question, tags, self.llm, self.config.planner_model, llm_logs,
+                )
+                save_brief(run_dir, brief)
+
+            n_bricks = len(brief.get("bricks", []))
+            n_combos = len(brief.get("combos", []))
+            await emit_progress(None, run_dir, "discovery_brief",
+                                f"Brief: {n_bricks} briques, {n_combos} combos identifiés")
+
+            # ── B-D. SEARCH: bricks + combos + friction + analogies + unknowns ──
+            await emit_progress(None, run_dir, "search",
+                                "Recherche approfondie brique par brique...")
+            sub_questions = brief_to_sub_questions(brief, tags=tags)
+            # Save the search plan as planner.json-shaped data so search_subquestions works
+            search_plan = {
+                "question_reformulated": brief.get("reformulated", question),
+                "sub_questions": sub_questions,
+            }
+            # Persist for resume
+            save_json(run_dir / "discovery_search_plan.json", search_plan)
+            await emit_progress(None, run_dir, "search",
+                                f"{len(sub_questions)} requêtes ciblées à exécuter")
+
+            sea = await self._step(
+                run_dir, "search_results", resume, None,
+                lambda: self.researcher.search_subquestions(search_plan, None, run_dir, tags=tags),
+            )
+
+            # ── CORPUS (download + extract) ──
+            await emit_progress(None, run_dir, "corpus",
+                                f"Téléchargement de {len(sea.get('sub_questions', []))} sets de résultats...")
+            cor = await self._step(
+                run_dir, "corpus", resume, None,
+                lambda: self.researcher.build_corpus(sea, None, run_dir, tags=tags),
+            )
+
+            status_data = load_json(s_path) or {}
+            status_data["sources_count"] = cor.get("count", 0)
+            save_json(s_path, status_data)
+
+            if not cor.get("sources") or cor.get("count", 0) == 0:
+                raise ValueError("Aucune source n'a pu être trouvée ou téléchargée.")
+
+            # ── E. SYNTHESIZE ──
+            await emit_progress(None, run_dir, "synthesis",
+                                f"Synthèse du corpus ({cor.get('count')} sources)...")
+            synth_path = run_dir / "discovery_synthesis.json"
+            if resume and synth_path.exists():
+                synth = load_json(synth_path)
+            else:
+                synth = await synthesize_corpus(
+                    brief, cor, run_dir, self.llm,
+                    self.config.extract_model, llm_logs,
+                )
+                save_synthesis(run_dir, synth)
+
+            # ── F. PLAN derived from synthesis ──
+            await emit_progress(None, run_dir, "planner",
+                                "Construction du plan ancré dans le corpus...")
+            planner_path = run_dir / "planner.json"
+            if resume and planner_path.exists():
+                pla = load_json(planner_path)
+            else:
+                pla = await build_plan_from_corpus(
+                    question, brief, synth,
+                    self.llm,
+                    self.config.planner_model,
+                    coder_model or self.config.planner_book_model_4_json,
+                    llm_logs,
+                )
+                save_json(planner_path, pla)
+
+            # ── VALIDATION PAUSE ──
+            if not (run_dir / "validated.txt").exists():
+                await emit_progress(None, run_dir, "awaiting_validation",
+                                    "Plan ready (research-first). Awaiting approval.")
+                return {"status": "paused"}
+
+            # ── G. RANK + CLAIMS + VERIFY + WRITE (same as classic pipeline) ──
+            await emit_progress(None, run_dir, "shortlist",
+                                "Classement des sources par pertinence...")
+            shor = await self._step(run_dir, "shortlist", resume, None,
+                lambda: self.analyst.rank_sources(pla, cor, llm_logs, None, run_dir))
+
+            await emit_progress(None, run_dir, "claims",
+                                "Extraction des affirmations factuelles...")
+            clm = await self._step(run_dir, "claims", resume, None,
+                lambda: self.analyst.extract_claims(pla, shor, cor, llm_logs, None, run_dir))
+
+            status_data = load_json(s_path) or {}
+            status_data["claims_count"] = len(clm.get("claims", []))
+            save_json(s_path, status_data)
+
+            await emit_progress(None, run_dir, "verdicts",
+                                f"Vérification de {len(clm['claims'])} affirmations...")
+            ver = await self._step(run_dir, "verdicts", resume, None,
+                lambda: self.analyst.verify_claims(
+                    clm["claims"], llm_logs, None, run_dir,
+                    sources=cor.get("sources"),
+                ))
+
+            await emit_progress(None, run_dir, "sections",
+                                "Rédaction des chapitres du dossier...")
+            sec = await self.writer.write_sections(
+                pla, clm["claims"], llm_logs, None, run_dir, language, tags=tags,
+            )
+
+            if include_images:
+                await emit_progress(None, run_dir, "sections", "Sélection des illustrations...")
+                sec = await self.writer.inject_illustrations(
+                    sec, clm["claims"], cor, run_dir,
+                    generate_ai=generate_ai_images, language=language,
+                )
+
+            await emit_progress(None, run_dir, "sections", "Génération du résumé exécutif...")
+            exec_summary = await self.writer.generate_executive_summary(
+                "\n".join(s["content"] for s in sec.get("sections", [])[:5]),
+                question, llm_logs, language,
+            )
+
+            report_md, annex_md = await self.writer.assemble_report(
+                pla, sec, clm["claims"], ver, cor, executive_summary=exec_summary,
+            )
+            (run_dir / "report.md").write_text(report_md, encoding="utf-8")
+            (run_dir / "annexes.md").write_text(annex_md, encoding="utf-8")
+
+            try:
+                from export_latex import generate_latex
+                generate_latex(run_id, data_dir=self.config.data_dir)
+            except Exception as e:
+                log.warning("Latex/PDF export failed", extra={"error": str(e)})
+
+            await emit_progress(None, run_dir, "completed", "Dossier completed.")
+            data = load_json(s_path) or {}
+            data["state"] = "completed"
+            save_json(s_path, data)
+            save_json(run_dir / "llm_logs.json", llm_logs)
+            return {"status": "completed"}
+
+        except Exception as e:
+            await emit_progress(None, run_dir, "failed", str(e))
+            data = load_json(s_path) or {}
+            data["state"] = "failed"
+            data["error"] = str(e)
+            save_json(s_path, data)
+            raise

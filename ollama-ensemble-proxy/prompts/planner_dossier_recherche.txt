@@ -1,0 +1,21 @@
+RESEARCH-FIRST PIPELINE MARKER
+
+Ce fichier n'est pas un prompt classique. Il signale à l'UI et à
+l'engine qu'un nouveau type de document est disponible :
+"dossier_recherche".
+
+Quand l'utilisateur choisit ce type, engine.run() bascule sur
+engine.run_research() :
+
+  A. analyze_subject(...)      -> discovery_brief.json
+  B-D. search_subquestions(...) -> sub_questions seedées depuis le brief
+       (briques individuelles + paires + frictions + analogies + unknowns)
+  E. synthesize_corpus(...)    -> discovery_synthesis.json
+  F. build_plan_from_corpus(...) -> planner.json ancré dans le corpus
+  ... pause de validation ...
+  G+. pipeline classique (rank, claims, verify, write, illustrate, PDF)
+
+Le but : éviter qu'un planner LLM imagine 13 chapitres × 5 sous-sections
+à partir d'une question sur un sujet de niche, et que la recherche
+échoue à remplir 95% des sous-sections imaginées. Ici on cherche
+d'abord, et le plan reflète ce qu'on a réellement trouvé.
